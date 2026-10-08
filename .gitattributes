@@ -1,0 +1,13 @@
+# Normalize line endings: the repo always stores LF, whatever OS you commit from.
+* text=auto
+# Scripts and configs that run on Linux (CI runners, containers, CloudShell): always LF
+*.sh text eol=lf
+*.tf text eol=lf
+*.py text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+# PowerShell scripts for Docker Desktop on Windows
+*.ps1 text eol=crlf
+# Binary files
+*.png binary

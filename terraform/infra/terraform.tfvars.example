@@ -1,0 +1,17 @@
+# Copy to terraform.tfvars (git-ignored) and fill in.
+owner       = "sebastien"
+alert_email = "you@example.com"
+
+# Optional
+# monthly_budget_usd  = 150
+# eks_version         = "1.35"          # must be in EKS standard support
+# node_instance_types = ["m5.large"]    # cost baseline; Day 4: ["m6g.large"] + node_ami_type = "AL2023_ARM_64_STANDARD"
+# node_desired_size   = 3               # Day 4: 2
+# db_instance_class   = "db.t4g.micro"
+# slack_webhook_url   = "https://hooks.slack.com/services/..."
+
+# Day 4 security services (paid after free trials -- turn off at teardown)
+# enable_guardduty   = true
+# enable_securityhub = true
+# enable_inspector   = true
+# enable_cloudtrail  = true

@@ -1,0 +1,26 @@
+# Formats Terraform code and commits the result (no local terraform needed).
+name: Terraform fmt
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.12.2
+          terraform_wrapper: false
+      - run: terraform fmt -recursive terraform
+      - name: Commit if anything changed
+        run: |
+          if git diff --quiet; then echo "Already formatted"; exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "style: terraform fmt"
+          git push

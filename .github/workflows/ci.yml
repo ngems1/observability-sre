@@ -1,0 +1,142 @@
+# PR gate (and reused by release.yml): test -> lint/build -> security scan -> IaC validation -> Helm validation.
+# No AWS credentials needed: everything here runs on the GitHub runner.
+name: CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+  workflow_call: # release.yml runs this first on every push to main
+
+permissions:
+  contents: read
+  security-events: write # SARIF upload to the Security tab (public repos / GHAS)
+
+env:
+  TF_VERSION: 1.12.2
+  TRIVY_IMAGE: aquasec/trivy:0.58.1
+  KUBECONFORM_VERSION: v0.6.7
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  app:
+    name: Test + lint (Python)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: opsdesk
+          POSTGRES_PASSWORD: opsdesk
+          POSTGRES_DB: opsdesk_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U opsdesk" --health-interval 5s --health-timeout 5s --health-retries 10
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: app/requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - name: Lint
+        run: |
+          ruff check .
+          ruff format --check .
+      - name: Tests (real PostgreSQL, mocked SQS)
+        env:
+          OPSDESK_DATABASE_URL: postgresql+psycopg://opsdesk:opsdesk@localhost:5432/opsdesk_test
+        run: pytest -q
+
+  image:
+    name: Build + scan image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: docker build -t opsdesk:ci app
+      - name: Trivy - dependencies (requirements.txt)
+        run: |
+          docker run --rm -v "$PWD:/src" "$TRIVY_IMAGE" fs --scanners vuln \
+            --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1 /src/app
+      - name: "Trivy - image (gate: fixable CRITICAL/HIGH)"
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$TRIVY_IMAGE" image \
+            --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1 opsdesk:ci
+      - name: Trivy - SARIF report (all severities)
+        if: always()
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD:/out" "$TRIVY_IMAGE" image \
+            --format sarif --output /out/trivy-image.sarif opsdesk:ci
+      - name: Upload to GitHub code scanning
+        if: always()
+        continue-on-error: true # needs a public repo or GitHub Advanced Security
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
+
+  iac:
+    name: Terraform validate + Checkov
+    runs-on: ubuntu-latest
+    env:
+      TF_PLUGIN_CACHE_DIR: /tmp/tf-plugin-cache # one AWS provider download shared by the three roots
+    steps:
+      - run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      - name: terraform fmt (style - reported as a warning, not a gate)
+        run: |
+          terraform fmt -check -recursive -diff terraform || \
+            echo "::warning title=terraform fmt::style differences found - run the 'Terraform fmt' workflow or terraform fmt -recursive"
+      - name: terraform validate (no backend, no credentials)
+        run: |
+          for root in bootstrap infra platform; do
+            echo "::group::$root"
+            terraform -chdir=terraform/$root init -backend=false -input=false
+            terraform -chdir=terraform/$root validate
+            echo "::endgroup::"
+          done
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install checkov
+      - name: Checkov - Terraform (exceptions are justified inline)
+        run: checkov -d terraform --framework terraform --quiet --compact --skip-path '\.terraform'
+      - name: Checkov - CloudFormation bootstrap
+        run: checkov -f bootstrap/github-oidc-bootstrap.yaml --framework cloudformation --quiet --compact
+
+  helm:
+    name: Helm lint + kubeconform + Checkov
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: helm lint (local + EKS values)
+        run: |
+          helm lint helm/opsdesk -f helm/opsdesk/values-local.yaml
+          helm lint helm/opsdesk -f helm/opsdesk/values-eks.yaml -f helm/opsdesk/ci/values-eks-ci.yaml
+      - name: Render EKS manifests
+        run: |
+          mkdir -p rendered
+          helm template opsdesk helm/opsdesk -n opsdesk \
+            -f helm/opsdesk/values-eks.yaml -f helm/opsdesk/ci/values-eks-ci.yaml > rendered/eks.yaml
+      - name: kubeconform (schemas; CRDs skipped)
+        run: |
+          curl -fsSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" | tar xz
+          ./kubeconform -strict -summary -ignore-missing-schemas rendered/eks.yaml
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install checkov
+      - name: Checkov - rendered Kubernetes manifests
+        run: checkov -d rendered --framework kubernetes --quiet --compact

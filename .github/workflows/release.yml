@@ -1,0 +1,126 @@
+# Release pipeline (every push to main, or Actions -> Release -> Run):
+#   CI (tests, lint, Trivy, Checkov, Helm) -> build immutable image (commit SHA) -> Trivy gate -> push to ECR
+#   -> [approval: demo environment] -> helm upgrade --atomic -> smoke test -> automatic rollback on failure
+# If the AWS environment is down (destroyed for the night), build/deploy are skipped with a notice.
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+  security-events: write
+
+concurrency:
+  group: aws-demo
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  TF_VERSION: 1.12.2
+  TRIVY_IMAGE: aquasec/trivy:0.58.1
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  environment:
+    name: Is the AWS environment up?
+    needs: ci
+    if: vars.AWS_ROLE_ARN != '' # skipped until the AWS bootstrap is done
+    runs-on: ubuntu-latest
+    outputs:
+      up: ${{ steps.check.outputs.up }}
+      repo: ${{ steps.check.outputs.repo }}
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - id: check
+        run: |
+          if aws eks describe-cluster --name opsdesk-demo >/dev/null 2>&1 \
+             && repo=$(aws ecr describe-repositories --repository-names opsdesk --query 'repositories[0].repositoryUri' --output text 2>/dev/null); then
+            echo "up=true" >> "$GITHUB_OUTPUT"; echo "repo=$repo" >> "$GITHUB_OUTPUT"
+          else
+            echo "up=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Deploy skipped::AWS environment is down. Run the Infrastructure workflow (apply), then re-run Release."
+          fi
+
+  build:
+    name: Build, scan, push
+    needs: environment
+    if: needs.environment.outputs.up == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: meta
+        run: echo "tag=${GITHUB_SHA::12}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+      - name: Build (immutable tag = commit SHA)
+        run: |
+          docker build --platform linux/amd64 \
+            --label org.opencontainers.image.revision="$GITHUB_SHA" \
+            -t "${{ needs.environment.outputs.repo }}:${{ steps.meta.outputs.tag }}" app
+      - name: Trivy gate (fixable CRITICAL/HIGH block the release)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$TRIVY_IMAGE" image \
+            --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1 \
+            "${{ needs.environment.outputs.repo }}:${{ steps.meta.outputs.tag }}"
+      - name: Push to ECR
+        run: docker push "${{ needs.environment.outputs.repo }}:${{ steps.meta.outputs.tag }}"
+      - name: ECR scan-on-push result
+        run: |
+          aws ecr wait image-scan-complete --repository-name opsdesk --image-id imageTag=${{ steps.meta.outputs.tag }} || true
+          aws ecr describe-image-scan-findings --repository-name opsdesk --image-id imageTag=${{ steps.meta.outputs.tag }} \
+            --query 'imageScanFindings.findingSeverityCounts' --output table || true
+
+  deploy:
+    name: Deploy to EKS (demo)
+    needs: [environment, build]
+    runs-on: ubuntu-latest
+    environment: demo # required reviewer approves the deployment
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      - uses: azure/setup-helm@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: helm upgrade --atomic + smoke test
+        env:
+          TAG: ${{ needs.build.outputs.tag }}
+        run: bash scripts/aws/deploy-app.sh --no-build
+      - name: Roll back on failure
+        if: failure()
+        run: |
+          source scripts/aws/lib.sh
+          kubeconfig
+          helm rollback opsdesk 0 -n "$APP_NS" --wait && echo "::warning::Rolled back to the previous release"
+          helm history opsdesk -n "$APP_NS" --max 5
+      - name: Summary
+        if: success()
+        run: |
+          source scripts/aws/lib.sh
+          kubeconfig
+          host=$(kubectl -n "$APP_NS" get ingress opsdesk-api -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+          {
+            echo "### Deployed opsdesk:${{ needs.build.outputs.tag }}"
+            echo "- Web UI: http://${host}/"
+            echo "- Grafana: http://${host}/grafana (login in Secrets Manager \`opsdesk-demo/grafana\`)"
+            echo "- Rollback: Actions -> Ops -> rollback"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,128 @@
+# Defaults target EKS. Docker Desktop overrides live in values-local.yaml.
+
+image:
+  repository: opsdesk            # EKS: <account>.dkr.ecr.<region>.amazonaws.com/opsdesk
+  tag: local                     # CI sets this to the commit SHA
+  pullPolicy: IfNotPresent
+
+# Non-secret configuration, passed as env vars to every container
+config:
+  OPSDESK_ENVIRONMENT: eks
+  OPSDESK_LOG_LEVEL: INFO
+  OPSDESK_AWS_REGION: us-east-1
+  OPSDESK_SQS_QUEUE_NAME: opsdesk-notifications
+  OPSDESK_SQS_MAX_RECEIVE_COUNT: "3"
+  OPSDESK_DB_POOL_SIZE: "5"
+  OPSDESK_DB_MAX_OVERFLOW: "5"
+  OPSDESK_AUTO_ASSIGN: "true"
+  OPSDESK_OTEL_EXPORTER_OTLP_ENDPOINT: ""   # e.g. http://adot-collector.observability:4318
+  OPSDESK_OTEL_SAMPLE_RATIO: "1.0"
+  OPSDESK_GRAFANA_URL: ""                   # set to enable "open in Grafana" trace links in the UI
+  # Alertmanager webhook: alert severities that open an incident follow-up ticket
+  OPSDESK_ALERT_TICKET_SEVERITIES: critical,warning
+
+# Failure-drill switches. Change with: helm upgrade ... --set chaos.latencyMs=800
+chaos:
+  latencyMs: 0
+  errorRate: 0
+  workerFailRate: 0
+
+# Secret env vars: OPSDESK_DATABASE_URL, OPSDESK_SLACK_WEBHOOK_URL, OPSDESK_BOOTSTRAP_USERS,
+# OPSDESK_ALERT_WEBHOOK_TOKEN (bearer token Alertmanager sends to /integrations/alertmanager)
+secrets:
+  create: false                  # true = chart renders a Secret from secrets.values (local only)
+  existingSecret: opsdesk-secrets  # EKS: synced from Secrets Manager by External Secrets
+  values: {}
+
+# EKS: sync the Kubernetes Secret from AWS Secrets Manager (needs External Secrets Operator).
+# Values are filled in from `terraform output helm_values` (see scripts/aws/deploy-app.sh).
+externalSecrets:
+  enabled: false
+  region: ""
+  refreshInterval: 1h
+  appSecretName: ""      # Secrets Manager name of the app secret
+  dbSecretArn: ""        # RDS-managed master user secret
+  dbHost: ""
+  dbName: opsdesk
+
+serviceAccount:
+  api:
+    annotations: {}              # EKS IRSA: eks.amazonaws.com/role-arn: arn:aws:iam::<acct>:role/opsdesk-api
+  worker:
+    annotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+api:
+  replicas: 2
+  port: 8080
+  migrateOnStart: true           # initContainer runs Alembic (advisory-locked) before the API starts
+  service:
+    type: ClusterIP
+    port: 80
+  resources:
+    requests: { cpu: 100m, memory: 192Mi }
+    limits: { memory: 384Mi }
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+  pdb:
+    minAvailable: 1
+  extraEnv: []
+
+worker:
+  replicas: 1
+  metricsPort: 9100
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 256Mi }
+  extraEnv: []
+
+ingress:
+  enabled: false
+  className: alb
+  host: ""
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internal
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/healthcheck-path: /readyz
+
+monitoring:
+  serviceMonitor:
+    enabled: false               # needs the Prometheus Operator CRDs (kube-prometheus-stack)
+    interval: 15s
+    labels: {}
+  # Alert rules (PrometheusRule). Alertmanager routes them to /integrations/alertmanager, which opens
+  # incident follow-up tickets (see deploy/observability/kube-prometheus-stack-values.yaml).
+  prometheusRule:
+    enabled: false               # needs the Prometheus Operator CRDs
+    labels: {}
+    team: platform               # owning team label -> ticket team
+    runbookBaseUrl: ""           # e.g. https://github.com/<owner>/opsdesk/blob/main/docs/runbook.md
+    sloAvailability: 0.995       # availability SLO; burn-rate alerts are derived from its error budget
+    latencyP95Seconds: 0.5       # symptom: user-facing latency
+    dbP99Seconds: 0.25           # cause: time inside PostgreSQL
+    queueBacklog: 20             # cause: visible messages waiting in SQS
+
+networkPolicy:
+  enabled: false
+  # ports the pods may reach outside the cluster (Postgres, HTTPS for AWS APIs, OTLP)
+  egressPorts: [5432, 443, 4318, 9324]
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

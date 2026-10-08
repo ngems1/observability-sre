@@ -1,0 +1,93 @@
+# Local stand-in for SQS: ElasticMQ speaks the SQS API.
+# Same queue names and redrive policy (maxReceiveCount 3 -> DLQ) as Terraform will create on AWS.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: elasticmq
+  namespace: opsdesk-deps
+data:
+  elasticmq.conf: |
+    include classpath("application.conf")
+
+    node-address {
+      protocol = http
+      host = elasticmq.opsdesk-deps.svc.cluster.local
+      port = 9324
+      context-path = ""
+    }
+
+    rest-sqs {
+      enabled = true
+      bind-port = 9324
+      bind-hostname = "0.0.0.0"
+      sqs-limits = strict
+    }
+
+    rest-stats {
+      enabled = true
+      bind-port = 9325
+      bind-hostname = "0.0.0.0"
+    }
+
+    queues {
+      opsdesk-notifications {
+        defaultVisibilityTimeout = 30 seconds
+        receiveMessageWait = 0 seconds
+        deadLettersQueue {
+          name = "opsdesk-notifications-dlq"
+          maxReceiveCount = 3
+        }
+      }
+      opsdesk-notifications-dlq {
+        defaultVisibilityTimeout = 30 seconds
+      }
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticmq
+  namespace: opsdesk-deps
+  labels: { app: elasticmq }
+spec:
+  selector: { app: elasticmq }
+  ports:
+    - name: sqs
+      port: 9324
+    - name: stats
+      port: 9325
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: elasticmq
+  namespace: opsdesk-deps
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: elasticmq }
+  template:
+    metadata:
+      labels: { app: elasticmq }
+    spec:
+      containers:
+        - name: elasticmq
+          # If this tag fails to pull, use the latest 1.6.x tag from Docker Hub.
+          image: softwaremill/elasticmq-native:1.6.5
+          ports:
+            - containerPort: 9324
+            - containerPort: 9325
+          readinessProbe:
+            tcpSocket: { port: 9324 }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          volumeMounts:
+            - name: config
+              mountPath: /opt/elasticmq.conf     # default config path of the native image
+              subPath: elasticmq.conf
+      volumes:
+        - name: config
+          configMap:
+            name: elasticmq

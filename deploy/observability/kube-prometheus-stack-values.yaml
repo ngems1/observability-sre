@@ -1,0 +1,103 @@
+# helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+#   -n observability --create-namespace -f deploy/observability/kube-prometheus-stack-values.yaml
+# Sized for Docker Desktop. EKS uses the same chart with larger retention/resources.
+
+prometheus:
+  prometheusSpec:
+    retention: 3d
+    enableFeatures:
+      - exemplar-storage          # keeps trace_id exemplars from /metrics
+    # pick up ServiceMonitors/rules from every namespace, not only this release's
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    resources:
+      requests: { cpu: 100m, memory: 512Mi }
+
+alertmanager:
+  alertmanagerSpec:
+    resources:
+      requests: { cpu: 10m, memory: 32Mi }
+  # Critical alerts, and warnings that name an owning team, open an incident follow-up ticket in
+  # OpsDesk (POST /integrations/alertmanager). Resolved notifications record the time to recover.
+  # EKS: same routing in terraform/platform/observability.tf, token read from a mounted Secret.
+  config:
+    global:
+      resolve_timeout: 5m
+    route:
+      receiver: "null"
+      group_by: [alertname, namespace]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+      routes:
+        - receiver: "null"
+          matchers: ['alertname=~"Watchdog|InfoInhibitor"']
+        - receiver: opsdesk
+          matchers: ['severity="critical"']
+        - receiver: opsdesk
+          matchers: ['severity="warning"', 'team=~".+"']
+    inhibit_rules:
+      - source_matchers: ['severity="critical"']
+        target_matchers: ['severity="warning"']
+        equal: [alertname, namespace]
+      # While a cause alert (layer kubernetes/network/database/queue/app) fires, mute the symptom alerts
+      # (error budget burn, latency): the incident ticket names the failing layer, not "errors went up".
+      - source_matchers: ['alert_type="cause"']
+        target_matchers: ['alert_type="symptom"']
+        equal: [namespace]
+      # Pods turn unready because a dependency is unreachable: the dependency alert is the incident
+      - source_matchers: ['alertname=~"OpsDeskDependencyUnreachable|OpsDeskDatabaseErrors"']
+        target_matchers: ['alertname="OpsDeskPodsUnavailable"']
+        equal: [namespace]
+      # A stopped worker explains the backlog: one ticket, not two
+      - source_matchers: ['alertname="OpsDeskWorkerDown"']
+        target_matchers: ['alertname="OpsDeskQueueBacklog"']
+        equal: [namespace]
+    receivers:
+      - name: "null"
+      - name: opsdesk
+        webhook_configs:
+          - url: http://opsdesk-api.opsdesk.svc.cluster.local:8080/integrations/alertmanager
+            send_resolved: true
+            max_alerts: 50
+            http_config:
+              authorization:
+                type: Bearer
+                credentials: local-alert-token   # local only; matches OPSDESK_ALERT_WEBHOOK_TOKEN in values-local.yaml
+
+grafana:
+  adminPassword: opsdesk-local   # local only
+  service:
+    type: LoadBalancer           # http://localhost:3000
+    port: 3000
+  sidecar:
+    dashboards:
+      enabled: true
+      searchNamespace: ALL       # loads ConfigMaps labelled grafana_dashboard=1 from any namespace
+    datasources:
+      # exemplar dots on Prometheus panels link straight to the trace in Tempo
+      exemplarTraceIdDestinations:
+        datasourceUid: tempo
+        traceIdLabelName: trace_id
+  additionalDataSources:
+    - name: Tempo
+      uid: tempo
+      type: tempo
+      access: proxy
+      url: http://tempo.observability.svc.cluster.local:3200
+      jsonData:
+        serviceMap:
+          datasourceUid: prometheus
+        nodeGraph:
+          enabled: true
+
+# Control-plane components are not reachable on Docker Desktop
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeProxy:
+  enabled: false

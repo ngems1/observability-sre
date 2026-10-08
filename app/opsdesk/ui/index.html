@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OpsDesk</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%231f6feb'/%3E%3Cpath d='M9 11h14M9 16h14M9 21h9' stroke='white' stroke-width='2.5' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Sign-in -->
+  <section id="login" class="login hidden" aria-labelledby="login-title">
+    <div class="login-card">
+      <div class="brand brand-lg"><span class="brand-mark" aria-hidden="true"></span>OpsDesk</div>
+      <h1 id="login-title">Sign in</h1>
+      <p class="muted">Internal DevOps ticketing &amp; access requests</p>
+      <form id="login-form">
+        <label for="api-key">API key</label>
+        <input id="api-key" type="password" autocomplete="off" placeholder="Paste your API key" required>
+        <button class="btn btn-primary btn-block" type="submit">Sign in</button>
+      </form>
+      <div id="demo-users" class="demo-users hidden">
+        <p class="muted small">Local demo users</p>
+        <div id="demo-user-list" class="demo-user-list"></div>
+      </div>
+      <p id="login-error" class="error small hidden" role="alert"></p>
+    </div>
+  </section>
+
+  <!-- App -->
+  <div id="app" class="hidden">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark" aria-hidden="true"></span>OpsDesk</div>
+      <span id="env-badge" class="env-badge"></span>
+      <div class="topbar-right">
+        <a id="grafana-link" class="toplink hidden" target="_blank" rel="noopener">Grafana</a>
+        <a class="toplink" href="/docs" target="_blank" rel="noopener">API docs</a>
+        <div class="user-chip">
+          <span id="user-avatar" class="avatar" aria-hidden="true"></span>
+          <span><strong id="user-name"></strong><span id="user-role" class="muted small"></span></span>
+        </div>
+        <button id="logout" class="btn btn-ghost btn-sm" type="button">Sign out</button>
+      </div>
+    </header>
+
+    <main class="page">
+      <nav class="crumbs" aria-label="Breadcrumb"><a href="#" id="crumb-home">Home</a><span aria-hidden="true">›</span><span>Tickets</span></nav>
+      <div class="page-head">
+        <h1>Tickets</h1>
+        <button id="new-ticket" class="btn btn-primary" type="button">+ New ticket</button>
+      </div>
+
+      <div class="tabs" role="tablist" id="tabs">
+        <button role="tab" data-view="mine">My tickets <span class="count" data-count="mine">0</span></button>
+        <button role="tab" data-view="pending_approval">Pending approval <span class="count" data-count="pending_approval">0</span></button>
+        <button role="tab" data-view="open">Open <span class="count" data-count="open">0</span></button>
+        <button role="tab" data-view="breached">SLA breached <span class="count count-danger" data-count="breached">0</span></button>
+        <button role="tab" data-view="all">All <span class="count" data-count="all">0</span></button>
+      </div>
+
+      <div class="filters">
+        <input id="f-q" type="search" placeholder="Search titles…" aria-label="Search titles">
+        <select id="f-team" aria-label="Team"><option value="">All teams</option></select>
+        <select id="f-priority" aria-label="Priority"><option value="">All priorities</option></select>
+        <select id="f-type" aria-label="Type"><option value="">All types</option></select>
+        <span id="refresh-note" class="muted small"></span>
+      </div>
+
+      <div class="table-wrap">
+        <table class="tickets" aria-describedby="tabs">
+          <thead>
+            <tr>
+              <th>Ticket</th><th>Title</th><th>Priority</th><th>Status</th><th>Team</th>
+              <th>Assignee</th><th>Triage SLA</th><th>Created</th><th><span class="sr-only">Action</span></th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+        <div id="empty" class="empty hidden">No tickets in this view.</div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Ticket drawer -->
+  <div id="drawer-backdrop" class="backdrop hidden"></div>
+  <aside id="drawer" class="drawer hidden" role="dialog" aria-modal="true" aria-labelledby="d-title">
+    <div class="drawer-head">
+      <div>
+        <div class="drawer-key" id="d-key"></div>
+        <h2 id="d-title"></h2>
+        <div class="pills" id="d-pills"></div>
+      </div>
+      <button class="icon-btn" id="drawer-close" type="button" aria-label="Close">✕</button>
+    </div>
+    <div class="drawer-body">
+      <dl class="meta" id="d-meta"></dl>
+      <section id="d-alert" class="card card-alert hidden"></section>
+      <p id="d-desc" class="desc"></p>
+      <section id="d-access" class="card hidden"></section>
+      <section id="d-actions" class="card"></section>
+      <div class="subtabs" role="tablist">
+        <button role="tab" data-sub="comments" class="active">Comments</button>
+        <button role="tab" data-sub="audit">Audit trail</button>
+        <button role="tab" data-sub="delivery">Notifications</button>
+      </div>
+      <section id="d-sub" class="subpanel"></section>
+    </div>
+  </aside>
+
+  <!-- New ticket -->
+  <dialog id="new-dialog" class="modal" aria-labelledby="new-title">
+    <form id="new-form" method="dialog">
+      <h2 id="new-title">New ticket</h2>
+      <div class="grid2">
+        <label>Type
+          <select name="type" id="n-type">
+            <option value="change_request">Change request</option>
+            <option value="access_request">Access request</option>
+            <option value="incident_followup">Incident follow-up</option>
+          </select>
+        </label>
+        <label>Priority
+          <select name="priority">
+            <option value="low">Low</option><option value="medium" selected>Medium</option>
+            <option value="high">High</option><option value="critical">Critical</option>
+          </select>
+        </label>
+      </div>
+      <label>Title <input name="title" required minlength="3" maxlength="200" placeholder="e.g. Rotate prod RDS credentials"></label>
+      <label>Team <select name="team" id="n-team"></select></label>
+      <label>Description <textarea name="description" rows="3" maxlength="10000"></textarea></label>
+      <fieldset id="n-access" class="hidden">
+        <legend>Access details</legend>
+        <div class="grid2">
+          <label>Resource <input name="resource" placeholder="prod-eks-cluster"></label>
+          <label>Role <input name="requested_role" placeholder="read-only"></label>
+        </div>
+        <div class="grid2">
+          <label>Duration (days) <input name="duration_days" type="number" min="1" max="90" value="7"></label>
+          <span></span>
+        </div>
+        <label>Justification <textarea name="justification" rows="2" placeholder="Why do you need it?"></textarea></label>
+      </fieldset>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" value="cancel" formnovalidate type="submit">Cancel</button>
+        <button class="btn btn-primary" value="create" type="submit">Create ticket</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+  <script src="app.js"></script>
+</body>
+</html>

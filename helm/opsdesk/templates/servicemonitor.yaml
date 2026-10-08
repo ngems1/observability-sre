@@ -1,0 +1,25 @@
+{{- if .Values.monitoring.serviceMonitor.enabled }}
+{{- range $component := list "api" "worker" }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "opsdesk.fullname" $ }}-{{ $component }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "opsdesk.labels" $ | nindent 4 }}
+    {{- with $.Values.monitoring.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "opsdesk.selectorLabels" (dict "root" $ "component" $component) | nindent 6 }}
+  endpoints:
+    - port: {{ ternary "http" "metrics" (eq $component "api") }}
+      path: /metrics
+      interval: {{ $.Values.monitoring.serviceMonitor.interval }}
+      # keep exemplars (trace_id) - requires Prometheus exemplar storage enabled
+      scheme: http
+{{- end }}
+{{- end }}

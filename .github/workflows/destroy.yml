@@ -1,0 +1,49 @@
+# Tear the AWS environment down (keeps only the Terraform state bucket and the bootstrap role).
+# Run it whenever you stop working: EKS, NAT, RDS and the ALB bill every hour they exist.
+name: Destroy
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: Type "destroy" to confirm
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: aws-demo
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  TF_VERSION: 1.12.2
+  TF_VAR_owner: ${{ vars.OWNER }}
+  TF_VAR_alert_email: ${{ vars.ALERT_EMAIL }}
+  TF_VAR_allowed_cidrs: ${{ vars.ALLOWED_CIDRS }}
+  TF_VAR_admin_principal_arns: ${{ vars.CONSOLE_ADMIN_ARNS || '[]' }}
+
+jobs:
+  destroy:
+    if: inputs.confirm == 'destroy'
+    runs-on: ubuntu-latest
+    environment: demo
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      - uses: azure/setup-helm@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 7200
+      - name: Destroy app, platform, infra (in that order)
+        env:
+          CONFIRM: destroy
+        run: bash scripts/aws/down.sh

@@ -1,0 +1,50 @@
+# EKS overrides. Environment-specific values (ECR repo, IRSA role ARNs, secret ARNs, DB host,
+# ALB annotations) are generated from Terraform outputs into values-eks.generated.yaml by
+# scripts/aws/deploy-app.sh and layered on top of this file.
+
+image:
+  pullPolicy: IfNotPresent
+
+config:
+  OPSDESK_ENVIRONMENT: eks
+  OPSDESK_LOG_LEVEL: INFO
+  OPSDESK_SQS_MAX_RECEIVE_COUNT: "3"
+  OPSDESK_DB_POOL_SIZE: "5"
+  OPSDESK_DB_MAX_OVERFLOW: "5"
+  OPSDESK_OTEL_SAMPLE_RATIO: "1.0"    # 100% for the demo; 0.1 is a sensible production default
+
+secrets:
+  create: false
+  existingSecret: opsdesk-secrets     # created by the ExternalSecret
+
+externalSecrets:
+  enabled: true
+
+api:
+  replicas: 2
+  service:
+    type: ClusterIP
+    port: 80
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+
+worker:
+  replicas: 1
+
+ingress:
+  enabled: true
+  className: alb
+  host: ""                            # no DNS name for the demo: use the ALB hostname
+
+monitoring:
+  serviceMonitor:
+    enabled: true
+  prometheusRule:
+    enabled: true                     # runbookBaseUrl is set by the Release workflow (repository URL)
+
+networkPolicy:
+  enabled: true                       # enforced by the VPC CNI (enableNetworkPolicy=true)
+  egressPorts: [5432, 443, 4318]      # RDS, AWS APIs (SQS/STS), OTel collector

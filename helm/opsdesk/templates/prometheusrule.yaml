@@ -1,0 +1,233 @@
+{{- if .Values.monitoring.prometheusRule.enabled }}
+{{- $fn := include "opsdesk.fullname" . }}
+{{- $r := .Values.monitoring.prometheusRule }}
+{{- $ns := .Release.Namespace }}
+{{- $sel := printf "namespace=\"%s\"" $ns }}
+{{- $api := printf "job=\"%s-api\",namespace=\"%s\",route!~\"/|/ui|/healthz|/readyz|/metrics\"" $fn $ns }}
+{{- $runbook := $r.runbookBaseUrl }}
+{{- $budget := printf "(1 - %v)" $r.sloAvailability }}
+# Alerts that open incident follow-up tickets: Prometheus -> Alertmanager -> POST /integrations/alertmanager.
+# Every alert carries:
+#   layer       kubernetes | app | queue | database | network  (where the fault is)  or  slo (user-facing symptom)
+#   alert_type  cause | symptom  - Alertmanager mutes symptom alerts while a cause alert fires, so the incident
+#                                  ticket names the failing layer instead of "errors went up"
+#   severity    ticket priority;  team  ticket team;  runbook_url  section of docs/runbook.md
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ $fn }}-alerts
+  namespace: {{ $ns }}
+  labels:
+    {{- include "opsdesk.labels" . | nindent 4 }}
+    {{- with $r.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    # ------------------------------------------------------------------ SLO recording rules
+    - name: opsdesk.slo
+      rules:
+        {{- range $w := list "5m" "30m" "1h" "6h" }}
+        - record: opsdesk:api_error_ratio:rate{{ $w }}
+          expr: |
+            sum(rate(http_server_request_duration_seconds_count{ {{- $api -}},status_code=~"5.."}[{{ $w }}]))
+              / sum(rate(http_server_request_duration_seconds_count{ {{- $api -}} }[{{ $w }}]))
+        {{- end }}
+
+    # ---------------------------------------------------------- symptoms (what users feel)
+    - name: opsdesk.symptoms
+      rules:
+        # Multi-window burn rate on the availability SLO ({{ $r.sloAvailability }}): fast = 2% of the 30-day budget
+        # in 1 h, slow = 5% in 6 h. The short window makes the alert stop quickly after recovery.
+        - alert: OpsDeskErrorBudgetBurn
+          expr: |
+            opsdesk:api_error_ratio:rate1h > (14.4 * {{ $budget }})
+              and opsdesk:api_error_ratio:rate5m > (14.4 * {{ $budget }})
+          for: 2m
+          labels:
+            severity: critical
+            window: fast
+            layer: slo
+            alert_type: symptom
+            team: {{ $r.team }}
+            namespace: {{ $ns }}
+          annotations:
+            summary: ticket-api is burning its error budget 14x too fast
+            description: {{ `"{{ $value | humanizePercentage }} of requests fail (1 h). Open the 'Where is the fault?' dashboard to find the layer."` }}
+            {{- if $runbook }}
+            runbook_url: {{ printf "%s#opsdeskerrorbudgetburn" $runbook }}
+            {{- end }}
+        - alert: OpsDeskErrorBudgetBurn
+          expr: |
+            opsdesk:api_error_ratio:rate6h > (6 * {{ $budget }})
+              and opsdesk:api_error_ratio:rate30m > (6 * {{ $budget }})
+          for: 15m
+          labels:
+            severity: warning
+            window: slow
+            layer: slo
+            alert_type: symptom
+            team: {{ $r.team }}
+            namespace: {{ $ns }}
+          annotations:
+            summary: ticket-api is burning its error budget 6x too fast
+            description: {{ `"{{ $value | humanizePercentage }} of requests fail (6 h). Open the 'Where is the fault?' dashboard to find the layer."` }}
+            {{- if $runbook }}
+            runbook_url: {{ printf "%s#opsdeskerrorbudgetburn" $runbook }}
+            {{- end }}
+        - alert: OpsDeskApiLatencyHigh
+          expr: |
+            histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{ {{- $api -}} }[5m])))
+              > {{ $r.latencyP95Seconds }}
+          for: 10m
+          labels:
+            severity: warning
+            layer: slo
+            alert_type: symptom
+            team: {{ $r.team }}
+            namespace: {{ $ns }}
+          annotations:
+            summary: {{ printf "ticket-api p95 latency above %vs" $r.latencyP95Seconds | quote }}
+            description: {{ `"p95 latency is {{ $value | humanizeDuration }}. If database time is normal the slowness is in the app (CPU, code, chaos)."` }}
+            {{- if $runbook }}
+            runbook_url: {{ printf "%s#opsdeskapilatencyhigh" $runbook }}
+            {{- end }}
+
+    # -------------------------------------------------------------- causes, one per layer
+    - name: opsdesk.causes
+      rules:
+        # ---- kubernetes
+        - alert: OpsDeskWorkerDown
+          expr: absent(up{job="{{ $fn }}-worker",{{ $sel }}} == 1)
+          for: 2m
+          labels:
+            severity: critical
+            layer: kubernetes
+            alert_type: cause
+            team: {{ $r.team }}
+            namespace: {{ $ns }}
+            service: ticket-worker
+          annotations:
+            summary: ticket-worker has no running instance
+            description: No ticket-worker pod has been up for 2 minutes (scaled to 0, crash loop or not schedulable). Notifications queue up in SQS.
+            {{- if $runbook }}
+            runbook_url: {{ printf "%s#opsdeskworkerdown" $runbook }}
+            {{- end }}
+        - alert: OpsDeskPodsUnavailable
+          expr: max by (deployment) (kube_deployment_status_replicas_unavailable{ {{- $sel -}},deployment=~"{{ $fn }}-.*"}) > 0
+          for: 5m
+          labels:
+            severity: warning
+            layer: kubernetes
+            alert_type: cause
+            team: {{ $r.team }}
+            namespace: {{ $ns }}
+          annotations:
+            summary: {{ `"{{ $labels.deployment }} has unavailable pods"` }}
+            description: {{ `"{{ $value }} pod(s) of {{ $labels.deployment }} not ready for 5 minutes: crash loop, image pull, probe failure or no node capacity."` }}
+            {{- if $runbook }}
+            runbook_url: {{ printf "%s#opsdeskpodsunavailable" $runbook }}
+            {{- end }}
+
+        # ---- network: the app cannot reach a dependency at all
+        - alert: OpsDeskDependencyUnreachable
+          expr: |
+            sum by (dependency, kind) (rate(opsdesk_dependency_errors_total{ {{- $sel -}},kind=~"dns|connect_timeout|refused|connection_lost"}[5m])) > 0
+          for: 2m
+          labels:
+            severity: critical
+            layer: network
+            alert_type: cause
+            team: {{ $r.team }}
+            namespace: {{ $ns }}
+          annotations:
+            summary: {{ `"{{ $labels.dependency }} unreachable from the pods ({{ $labels.kind }})"` }}
+            description: {{ `"Connections to {{ $labels.dependency }} fail with {{ $labels.kind }}: dns = name resolution, connect_timeout = packets dropped (NetworkPolicy, security group, route), refused = nothing listening on the port."` }}
+            {{- if $runbook }}
+            runbook_url: {{ printf "%s#opsdeskdependencyunreachable" $runbook }}
+            {{- end }}
+
+        # ---- database: reachable, but slow or rejecting work
+        - alert: OpsDeskDatabaseSlow
+          expr: |
+            histogram_quantile(0.99, sum by (le) (rate(opsdesk_db_query_duration_seconds_bucket{ {{- $sel -}} }[5m])))
+              > {{ $r.dbP99Seconds }}
+          for: 5m
+          labels:
+            severity: warning
+            layer: database
+            alert_type: cause
+            team: database
+            namespace: {{ $ns }}
+          annotations:
+            summary: {{ printf "PostgreSQL p99 statement time above %vs" $r.dbP99Seconds | quote }}
+            description: {{ `"p99 time inside PostgreSQL is {{ $value | humanizeDuration }}: missing index, lock contention or an overloaded instance."` }}
+            {{- if $runbook }}
+            runbook_url: {{ printf "%s#opsdeskdatabaseslow" $runbook }}
+            {{- end }}
+        - alert: OpsDeskDatabaseErrors
+          expr: |
+            sum by (kind) (rate(opsdesk_dependency_errors_total{ {{- $sel -}},dependency="postgres",kind=~"too_many_connections|query_timeout|auth|server_error"}[5m])) > 0
+          for: 2m
+          labels:
+            severity: critical
+            layer: database
+            alert_type: cause
+            team: database
+            namespace: {{ $ns }}
+          annotations:
+            summary: {{ `"PostgreSQL rejects requests ({{ $labels.kind }})"` }}
+            description: {{ `"The database is reachable but fails requests with {{ $labels.kind }}: too_many_connections = max_connections reached, auth = credentials/secret, query_timeout = statement cancelled."` }}
+            {{- if $runbook }}
+            runbook_url: {{ printf "%s#opsdeskdatabaseerrors" $runbook }}
+            {{- end }}
+
+        # ---- app configuration: connection pool too small for the load
+        - alert: OpsDeskDbPoolExhausted
+          expr: sum(rate(opsdesk_dependency_errors_total{ {{- $sel -}},dependency="postgres",kind="pool_timeout"}[5m])) > 0
+          for: 2m
+          labels:
+            severity: warning
+            layer: app
+            alert_type: cause
+            team: {{ $r.team }}
+            namespace: {{ $ns }}
+          annotations:
+            summary: requests wait for a free database connection and time out
+            description: The app's connection pool is exhausted while the database itself answers normally. Raise the pool size or reduce concurrency.
+            {{- if $runbook }}
+            runbook_url: {{ printf "%s#opsdeskdbpoolexhausted" $runbook }}
+            {{- end }}
+
+        # ---- queue
+        - alert: OpsDeskQueueBacklog
+          expr: max(opsdesk_queue_messages{ {{- $sel -}},queue="main",state="visible"}) > {{ $r.queueBacklog }}
+          for: 5m
+          labels:
+            severity: warning
+            layer: queue
+            alert_type: cause
+            team: {{ $r.team }}
+            namespace: {{ $ns }}
+          annotations:
+            summary: {{ `"{{ $value }} notifications waiting in SQS"` }}
+            description: Messages arrive faster than ticket-worker consumes them (worker slow, failing or too few replicas).
+            {{- if $runbook }}
+            runbook_url: {{ printf "%s#opsdeskqueuebacklog" $runbook }}
+            {{- end }}
+        - alert: OpsDeskDlqNotEmpty
+          expr: max(opsdesk_queue_messages{ {{- $sel -}},queue="dlq",state="visible"}) > 0
+          for: 1m
+          labels:
+            severity: warning
+            layer: queue
+            alert_type: cause
+            team: {{ $r.team }}
+            namespace: {{ $ns }}
+          annotations:
+            summary: {{ `"{{ $value }} message(s) in the dead-letter queue"` }}
+            description: Notifications failed 3 deliveries or could not be parsed. Inspect, fix, then redrive or delete.
+            {{- if $runbook }}
+            runbook_url: {{ printf "%s#opsdeskdlqnotempty" $runbook }}
+            {{- end }}
+{{- end }}

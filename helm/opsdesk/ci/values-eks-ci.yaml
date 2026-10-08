@@ -1,0 +1,25 @@
+# Stand-in for the Terraform-generated values so CI can lint/render/scan the EKS manifests
+# without an AWS environment. Never deployed.
+image:
+  repository: 123456789012.dkr.ecr.us-east-1.amazonaws.com/opsdesk
+  tag: ci
+config:
+  OPSDESK_AWS_REGION: us-east-1
+  OPSDESK_SQS_QUEUE_NAME: opsdesk-notifications
+  OPSDESK_OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.observability.svc.cluster.local:4318
+  OPSDESK_GRAFANA_URL: /grafana
+serviceAccount:
+  api:
+    annotations: { eks.amazonaws.com/role-arn: "arn:aws:iam::123456789012:role/opsdesk-demo-ticket-api" }
+  worker:
+    annotations: { eks.amazonaws.com/role-arn: "arn:aws:iam::123456789012:role/opsdesk-demo-ticket-worker" }
+externalSecrets:
+  region: us-east-1
+  appSecretName: opsdesk-demo/app
+  dbSecretArn: arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!db-ci
+  dbHost: opsdesk-demo-pg.example.us-east-1.rds.amazonaws.com
+ingress:
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/group.name: opsdesk
+    alb.ingress.kubernetes.io/inbound-cidrs: 203.0.113.10/32

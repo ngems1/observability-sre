@@ -1,0 +1,9 @@
+# Copy to terraform.tfvars (git-ignored).
+state_bucket  = "opsdesk-tfstate-<account-id>-us-east-1"   # output of terraform/bootstrap
+allowed_cidrs = ["203.0.113.10/32"]                        # your public IP (search "what is my ip")
+
+# Optional pins after the first install (helm list -A):
+# chart_versions = {
+#   kube_prometheus_stack = "x.y.z"
+#   tempo                 = "x.y.z"
+# }

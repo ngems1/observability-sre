@@ -1,0 +1,17 @@
+# helm upgrade --install tempo grafana/tempo -n observability -f deploy/observability/tempo-values.yaml
+# Single-binary Tempo. The app sends OTLP/HTTP to tempo.observability:4318.
+# On EKS the ADOT Collector sits in between and Tempo stores traces in S3.
+tempo:
+  retention: 72h
+  receivers:
+    otlp:
+      protocols:
+        http:
+          endpoint: "0.0.0.0:4318"
+        grpc:
+          endpoint: "0.0.0.0:4317"
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 512Mi }
+persistence:
+  enabled: false

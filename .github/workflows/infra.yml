@@ -1,0 +1,123 @@
+# Terraform for AWS: plan on pull requests and pushes, apply only on demand (Actions -> Infrastructure -> Run).
+# Apply is gated by the protected "demo" environment (required reviewer) and uses GitHub OIDC:
+# short-lived credentials from the opsdesk-github-deploy role, no AWS keys stored anywhere.
+# Apply is manual on purpose: the environment is torn down nightly to save money (see destroy.yml).
+name: Infrastructure
+
+on:
+  pull_request:
+    paths: ["terraform/**", ".github/workflows/infra.yml"]
+  push:
+    branches: [main]
+    paths: ["terraform/**", ".github/workflows/infra.yml"]
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "plan = preview only, apply = create/update infra + platform"
+        type: choice
+        options: [plan, apply]
+        default: plan
+
+permissions:
+  id-token: write # GitHub OIDC -> AWS STS
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: aws-demo # never two Terraform runs (or deploys) at the same time
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  TF_VERSION: 1.12.2
+  TF_IN_AUTOMATION: "true"
+  # Inputs come from repository variables (Settings -> Secrets and variables -> Actions -> Variables)
+  TF_VAR_owner: ${{ vars.OWNER }}
+  TF_VAR_alert_email: ${{ vars.ALERT_EMAIL }}
+  TF_VAR_allowed_cidrs: ${{ vars.ALLOWED_CIDRS }}
+  TF_VAR_admin_principal_arns: ${{ vars.CONSOLE_ADMIN_ARNS || '[]' }}
+  # Cost options (docs/cost.md): NODE_CAPACITY_TYPE=SPOT, NODE_INSTANCE_TYPES=["m5.large","m5a.large","m6i.large"], NODE_DESIRED_SIZE=2
+  TF_VAR_node_capacity_type: ${{ vars.NODE_CAPACITY_TYPE || 'ON_DEMAND' }}
+  TF_VAR_node_instance_types: ${{ vars.NODE_INSTANCE_TYPES || '["m5.large"]' }}
+  TF_VAR_node_desired_size: ${{ vars.NODE_DESIRED_SIZE || '3' }}
+  TF_VAR_enable_guardduty: ${{ vars.ENABLE_GUARDDUTY || 'false' }}
+  TF_VAR_enable_securityhub: ${{ vars.ENABLE_SECURITYHUB || 'false' }}
+  TF_VAR_enable_inspector: ${{ vars.ENABLE_INSPECTOR || 'false' }}
+  TF_VAR_enable_cloudtrail: ${{ vars.ENABLE_CLOUDTRAIL || 'false' }}
+  TF_VAR_slack_webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+jobs:
+  plan:
+    # skipped until the AWS bootstrap is done (repository variable AWS_ROLE_ARN set)
+    if: vars.AWS_ROLE_ARN != '' && (github.event_name != 'workflow_dispatch' || inputs.action == 'plan')
+    name: Plan (infra)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: terraform plan
+        run: |
+          source scripts/aws/lib.sh
+          tf_init infra
+          set +e
+          tf infra plan -input=false -no-color -lock-timeout=5m -out=/tmp/infra.tfplan > /tmp/plan.txt 2>&1
+          rc=$?
+          set -e
+          cat /tmp/plan.txt
+          {
+            echo "### Terraform plan (infra)"
+            echo '```'
+            grep -E '^(Plan:|No changes|Error)' /tmp/plan.txt || tail -5 /tmp/plan.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+
+  apply:
+    if: github.event_name == 'workflow_dispatch' && inputs.action == 'apply'
+    name: Apply infra + platform
+    runs-on: ubuntu-latest
+    environment: demo # protected environment: required reviewer approves before AWS is touched
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      - uses: azure/setup-helm@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 7200
+      - name: Check required variables
+        run: |
+          for v in OWNER ALERT_EMAIL ALLOWED_CIDRS AWS_ROLE_ARN; do
+            [[ -n "$(printenv "VAR_$v")" ]] || { echo "::error::Repository variable $v is not set"; exit 1; }
+          done
+        env:
+          VAR_OWNER: ${{ vars.OWNER }}
+          VAR_ALERT_EMAIL: ${{ vars.ALERT_EMAIL }}
+          VAR_ALLOWED_CIDRS: ${{ vars.ALLOWED_CIDRS }}
+          VAR_AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+      - name: Infra (~20 min first time) + platform (~10 min)
+        run: bash scripts/aws/up.sh --skip-app
+      - name: Summary
+        if: always()
+        run: |
+          source scripts/aws/lib.sh
+          kubeconfig || exit 0
+          {
+            echo "### Environment"
+            echo "- Cluster: \`$CLUSTER_NAME\` ($(kubectl get nodes --no-headers 2>/dev/null | wc -l) nodes)"
+            echo "- Next: run **Release** to build and deploy the app"
+            echo "- Grafana login: AWS console -> Secrets Manager -> \`opsdesk-demo/grafana\`"
+            echo "- Demo API keys: AWS console -> Secrets Manager -> \`opsdesk-demo/app\` (bootstrap_users)"
+          } >> "$GITHUB_STEP_SUMMARY"

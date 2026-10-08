@@ -1,0 +1,49 @@
+# Docker Desktop Kubernetes overrides.
+# Dependencies (Postgres + ElasticMQ) come from deploy/local/ in namespace opsdesk-deps.
+
+image:
+  repository: opsdesk
+  tag: local
+  pullPolicy: IfNotPresent       # uses the image you built with `docker build -t opsdesk:local app`
+
+config:
+  OPSDESK_ENVIRONMENT: local
+  OPSDESK_SQS_ENDPOINT_URL: http://elasticmq.opsdesk-deps.svc.cluster.local:9324
+  OPSDESK_SQS_WAIT_TIME_S: "5"
+  # Traces go straight to Tempo when the observability stack is installed
+  OPSDESK_OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo.observability.svc.cluster.local:4318
+  # Trace links in the web UI open Grafana Explore (browser-side URL)
+  OPSDESK_GRAFANA_URL: http://localhost:3000
+
+secrets:
+  create: true
+  existingSecret: ""
+  values:
+    OPSDESK_DATABASE_URL: postgresql+psycopg://opsdesk:opsdesk-local-pw@postgres.opsdesk-deps.svc.cluster.local:5432/opsdesk
+    OPSDESK_SLACK_WEBHOOK_URL: ""          # empty = log-only notifications
+    OPSDESK_ALERT_WEBHOOK_TOKEN: local-alert-token   # same value as deploy/observability/kube-prometheus-stack-values.yaml
+    OPSDESK_BOOTSTRAP_USERS: alice:requester:alice-local-key,bob:approver:bob-local-key,dave:approver:dave-local-key,carol:admin:carol-local-key
+    # ElasticMQ ignores credentials, but boto3 needs some
+    AWS_ACCESS_KEY_ID: local
+    AWS_SECRET_ACCESS_KEY: local
+
+api:
+  replicas: 2
+  service:
+    type: LoadBalancer           # Docker Desktop publishes this on http://localhost:8080
+    port: 8080
+  hpa:
+    enabled: false               # Docker Desktop has no metrics-server by default
+
+monitoring:
+  serviceMonitor:
+    enabled: true
+    labels:
+      release: kube-prometheus-stack
+  prometheusRule:
+    enabled: true
+    labels:
+      release: kube-prometheus-stack
+
+networkPolicy:
+  enabled: true                  # rendered and applied; Docker Desktop's CNI does not enforce it

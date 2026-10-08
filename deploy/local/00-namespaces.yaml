@@ -1,0 +1,17 @@
+# App namespace enforces the "restricted" Pod Security Standard.
+# Dependencies live in their own namespace because the official Postgres image
+# needs to start as root to initialise its data directory.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: opsdesk
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: opsdesk-deps
+  labels:
+    pod-security.kubernetes.io/enforce: baseline

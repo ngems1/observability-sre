@@ -1,0 +1,68 @@
+# Local stand-in for RDS PostgreSQL. max_connections is 100 so failure drill 4
+# (connection exhaustion) behaves like a small RDS instance.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres
+  namespace: opsdesk-deps
+type: Opaque
+stringData:
+  POSTGRES_USER: opsdesk
+  POSTGRES_PASSWORD: opsdesk-local-pw
+  POSTGRES_DB: opsdesk
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: opsdesk-deps
+  labels: { app: postgres }
+spec:
+  selector: { app: postgres }
+  ports:
+    - name: postgres
+      port: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: opsdesk-deps
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels: { app: postgres }
+  template:
+    metadata:
+      labels: { app: postgres }
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          args: ["-c", "max_connections=100", "-c", "shared_buffers=128MB", "-c", "log_min_duration_statement=500"]
+          envFrom:
+            - secretRef: { name: postgres }
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "opsdesk", "-d", "opsdesk"]
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { memory: 512Mi }
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 2Gi

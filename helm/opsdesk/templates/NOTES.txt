@@ -1,0 +1,17 @@
+OpsDesk {{ .Values.image.tag }} deployed to namespace {{ .Release.Namespace }}.
+
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+{{- if eq .Values.api.service.type "LoadBalancer" }}
+
+Web UI:    http://localhost:{{ .Values.api.service.port }}/
+API docs:  http://localhost:{{ .Values.api.service.port }}/docs
+{{- else }}
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "opsdesk.fullname" . }}-api 8080:{{ .Values.api.service.port }}
+  then open http://localhost:8080/ (web UI) or http://localhost:8080/docs
+{{- end }}
+
+Failure drills (chaos switches):
+  helm upgrade {{ .Release.Name }} <chart> --reuse-values --set chaos.latencyMs=800
+  helm upgrade {{ .Release.Name }} <chart> --reuse-values --set chaos.errorRate=0.2
+  kubectl -n {{ .Release.Namespace }} scale deploy/{{ include "opsdesk.fullname" . }}-worker --replicas=0

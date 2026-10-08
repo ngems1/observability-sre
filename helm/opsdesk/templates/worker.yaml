@@ -1,0 +1,98 @@
+{{- $ctx := dict "root" . "component" "worker" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "opsdesk.fullname" . }}-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "opsdesk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+  annotations:
+    # Checkov exceptions (justified; see docs/security/findings.md)
+    checkov.io/skip1: CKV_K8S_11=No CPU limit on purpose - CPU limits cause throttling; requests + HPA size the workload
+    checkov.io/skip2: CKV_K8S_43=ECR tags are immutable (commit SHA), so a tag pins one image like a digest
+    checkov.io/skip3: CKV_K8S_15=IfNotPresent is safe with immutable tags and avoids an ECR pull per pod start
+    checkov.io/skip4: CKV_K8S_35=12-factor env config; values come from External Secrets and rotate on pod restart
+spec:
+  replicas: {{ .Values.worker.replicas }}
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      {{- include "opsdesk.selectorLabels" $ctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "opsdesk.selectorLabels" $ctx | nindent 8 }}
+        app.kubernetes.io/version: {{ .Values.image.tag | quote }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/config.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "opsdesk.fullname" . }}-worker
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: worker
+          image: {{ include "opsdesk.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "opsdesk.worker.main"]
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.worker.metricsPort }}
+          envFrom:
+            {{- include "opsdesk.envFrom" . | nindent 12 }}
+          env:
+            - name: OPSDESK_SERVICE_NAME
+              value: ticket-worker
+            - name: OPSDESK_WORKER_METRICS_PORT
+              value: {{ .Values.worker.metricsPort | quote }}
+            {{- include "opsdesk.chaosEnv" . | nindent 12 }}
+            {{- with .Values.worker.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          readinessProbe:
+            httpGet: { path: /healthz, port: metrics }
+            periodSeconds: 10
+          livenessProbe:
+            # fails when the SQS poll loop has not completed for 60s
+            httpGet: { path: /healthz, port: metrics }
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      terminationGracePeriodSeconds: 30
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+# Headless service so Prometheus can discover the worker's /metrics
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "opsdesk.fullname" . }}-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "opsdesk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  clusterIP: None
+  selector:
+    {{- include "opsdesk.selectorLabels" $ctx | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.worker.metricsPort }}
+      targetPort: metrics

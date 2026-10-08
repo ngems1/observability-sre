@@ -1,0 +1,153 @@
+# Day-2 operations and failure drills without any local tools: Actions -> Ops -> Run workflow.
+# Every run prints the cluster state before and after, so the run log doubles as drill evidence
+# (record the timestamps: injected / alert fired / cause found / recovered).
+name: Ops
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: What to do
+        type: choice
+        options:
+          - status
+          - load-start
+          - load-stop
+          - drill1-pod-kill
+          - drill2-latency-on
+          - drill2-latency-off
+          - drill2-seed-1m-tickets
+          - drill2-explain
+          - drill2-fix-index
+          - drill3-stuck-queue-on
+          - drill3-stuck-queue-off
+          - drill3-poison-message
+          - drill4-pool-exhaustion-on
+          - drill4-pool-exhaustion-off
+          - drill6-network-block-db-on
+          - drill6-network-block-db-off
+          - errors-on
+          - errors-off
+          - rollback
+        default: status
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: aws-demo
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  TF_VERSION: 1.12.2
+
+jobs:
+  ops:
+    name: ${{ inputs.action }}
+    runs-on: ubuntu-latest
+    environment: demo
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      - uses: azure/setup-helm@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Before
+        run: |
+          source scripts/aws/lib.sh
+          kubeconfig
+          date -u +"injected/started at %Y-%m-%dT%H:%M:%SZ"
+          kubectl -n opsdesk get pods,hpa -o wide
+      - name: Run ${{ inputs.action }}
+        env:
+          ACTION: ${{ inputs.action }}
+        run: |
+          source scripts/aws/lib.sh
+          kubeconfig
+          NS=opsdesk
+          chaos() { helm upgrade opsdesk helm/opsdesk -n "$NS" --reuse-values "$@" --wait --timeout 5m; }
+          # no --wait: a drill that breaks readiness must not wait for pods to become ready
+          chaos_nowait() { helm upgrade opsdesk helm/opsdesk -n "$NS" --reuse-values "$@"; }
+          sql() {  # run SQL with the app's own DB connection (inside the api pod, autocommit)
+            kubectl -n "$NS" exec deploy/opsdesk-api -c api -- python -c "
+          import os, sys
+          from sqlalchemy import create_engine, text
+          e = create_engine(os.environ['OPSDESK_DATABASE_URL'], isolation_level='AUTOCOMMIT')
+          with e.connect() as c:
+              r = c.execute(text(sys.argv[1]))
+              if r.returns_rows:
+                  for row in r: print(*row)
+          print('ok')" "$1"
+          }
+          AUTOASSIGN="SELECT users.id FROM users LEFT OUTER JOIN (SELECT assignee_id, count(*) AS n FROM tickets WHERE status IN ('open','triaged','in_progress') AND assignee_id IS NOT NULL GROUP BY assignee_id) AS t ON t.assignee_id = users.id WHERE users.role = 'approver' ORDER BY coalesce(t.n, 0), users.id LIMIT 1"
+          case "$ACTION" in
+            status)
+              kubectl get nodes -o wide
+              kubectl -n "$NS" get deploy,svc,ingress,externalsecret,networkpolicy
+              helm history opsdesk -n "$NS" --max 5
+              kubectl -n "$NS" get events --sort-by=.lastTimestamp | tail -20 ;;
+            load-start) bash scripts/aws/load.sh ;;
+            load-stop)  bash scripts/aws/load.sh stop ;;
+            drill1-pod-kill)
+              pod=$(kubectl -n "$NS" get pod -l app.kubernetes.io/component=api -o jsonpath='{.items[0].metadata.name}')
+              kubectl -n "$NS" delete pod "$pod" --wait=false
+              kubectl -n "$NS" rollout status deploy/opsdesk-api --timeout=5m ;;
+            drill2-latency-on)  chaos --set chaos.latencyMs=800 ;;
+            drill2-latency-off) chaos --set chaos.latencyMs=0 ;;
+            drill2-seed-1m-tickets)
+              kubectl -n "$NS" exec deploy/opsdesk-api -c api -- python -m opsdesk.seed tickets 1000000 ;;
+            drill2-explain)   # the auto-assign query from the slow trace: Seq Scan before the fix, index after
+              sql "EXPLAIN (ANALYZE, BUFFERS) $AUTOASSIGN" ;;
+            drill2-fix-index)
+              sql "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_tickets_status_assignee ON tickets (status, assignee_id)"
+              sql "EXPLAIN (ANALYZE, BUFFERS) $AUTOASSIGN" ;;
+            drill3-stuck-queue-on)  kubectl -n "$NS" scale deploy/opsdesk-worker --replicas=0 ;;
+            drill3-stuck-queue-off) kubectl -n "$NS" scale deploy/opsdesk-worker --replicas=1
+                                    kubectl -n "$NS" rollout status deploy/opsdesk-worker --timeout=5m ;;
+            drill3-poison-message)
+              url=$(aws sqs get-queue-url --queue-name opsdesk-notifications --query QueueUrl --output text)
+              aws sqs send-message --queue-url "$url" --message-body '{not valid json'
+              echo "Poison message sent: after 3 receives it lands in the DLQ (alarm: opsdesk-demo-dlq-not-empty)" ;;
+            drill4-pool-exhaustion-on)
+              chaos --set config.OPSDESK_DB_POOL_SIZE=20 --set config.OPSDESK_DB_MAX_OVERFLOW=10 \
+                    --set api.hpa.minReplicas=6 --set api.hpa.maxReplicas=6 ;;
+            drill4-pool-exhaustion-off)
+              chaos --set config.OPSDESK_DB_POOL_SIZE=5 --set config.OPSDESK_DB_MAX_OVERFLOW=5 \
+                    --set api.hpa.minReplicas=2 --set api.hpa.maxReplicas=6 ;;
+            drill6-network-block-db-on)
+              # Network fault: the pods' egress NetworkPolicy no longer allows 5432 (enforced by the VPC CNI).
+              # The database itself stays healthy - the platform must say "network", not "database".
+              chaos_nowait --set 'networkPolicy.egressPorts={443,4318}'
+              # NetworkPolicies only apply to NEW connections: end the app's open DB sessions from a throwaway
+              # pod that the OpsDesk policies do not select, so the app has to reconnect (and cannot).
+              # shellcheck disable=SC2016  # $DB is expanded inside the pod, not here
+              kubectl -n "$NS" run drill6-cut --rm -i --restart=Never --image=postgres:16-alpine --overrides='{
+                "spec": {"securityContext": {"runAsNonRoot": true, "runAsUser": 70, "seccompProfile": {"type": "RuntimeDefault"}},
+                  "containers": [{"name": "drill6-cut", "image": "postgres:16-alpine",
+                    "command": ["sh", "-c", "psql \"$(echo \"$DB\" | sed s/+psycopg//)\" -Atc \"SELECT count(pg_terminate_backend(pid)) AS sessions_ended FROM pg_stat_activity WHERE usename = current_user AND pid <> pg_backend_pid()\""],
+                    "env": [{"name": "DB", "valueFrom": {"secretKeyRef": {"name": "opsdesk-secrets", "key": "OPSDESK_DATABASE_URL"}}}],
+                    "securityContext": {"allowPrivilegeEscalation": false, "capabilities": {"drop": ["ALL"]}}}]}}'
+              echo "Expect: OpsDeskDependencyUnreachable{dependency=postgres,kind=connect_timeout} -> ALERT ticket, layer network (~3 min)" ;;
+            drill6-network-block-db-off)
+              chaos_nowait --set 'networkPolicy.egressPorts={5432,443,4318}'
+              kubectl -n "$NS" rollout status deploy/opsdesk-api --timeout=5m
+              kubectl -n "$NS" get networkpolicy opsdesk-egress -o jsonpath='{.spec.egress[1].ports[*].port}'; echo ;;
+            errors-on)  chaos --set chaos.errorRate=0.2 ;;
+            errors-off) chaos --set chaos.errorRate=0 ;;
+            rollback)   helm rollback opsdesk 0 -n "$NS" --wait; helm history opsdesk -n "$NS" --max 5 ;;
+          esac
+      - name: After
+        if: always()
+        run: |
+          source scripts/aws/lib.sh
+          kubeconfig
+          date -u +"finished at %Y-%m-%dT%H:%M:%SZ"
+          kubectl -n opsdesk get pods,hpa -o wide
