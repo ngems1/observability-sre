@@ -4,11 +4,6 @@ output "state_bucket" {
 }
 
 output "deploy_role_arn" {
-  description = "GitHub repository variable AWS_ROLE_ARN."
-  value       = module.github_oidc.role_arn
-}
-
-output "next_steps" {
-  description = "What to do after the bootstrap."
-  value       = "GitHub -> Settings -> Secrets and variables -> Actions -> Variables: AWS_ROLE_ARN = ${module.github_oidc.role_arn}"
+  description = "GitHub repository variable AWS_ROLE_ARN (null when the role was created in the IAM console)."
+  value       = try(module.github_oidc[0].role_arn, null)
 }

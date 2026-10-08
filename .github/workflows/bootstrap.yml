@@ -1,0 +1,69 @@
+# One-time: create the Terraform state bucket with terraform/bootstrap (Actions -> Bootstrap -> Run workflow).
+# Prerequisite (once, IAM console - docs/aws.md step 2): the GitHub OIDC provider and the role in AWS_ROLE_ARN.
+# The bootstrap root's own state is stored in the bucket it creates (opsdesk/bootstrap.tfstate), so re-running
+# this workflow is safe: it restores that state first and Terraform only changes what drifted.
+name: Bootstrap
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write # GitHub OIDC -> AWS STS
+  contents: read
+
+concurrency:
+  group: aws-demo
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  TF_VERSION: 1.12.2
+  TF_IN_AUTOMATION: "true"
+  TF_VAR_manage_github_oidc: "false" # the OIDC trust and role were created in the IAM console
+  TF_VAR_github_repository: ${{ github.repository }}
+
+jobs:
+  bootstrap:
+    if: vars.AWS_ROLE_ARN != ''
+    name: State bucket
+    runs-on: ubuntu-latest
+    environment: demo
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Who am I
+        run: aws sts get-caller-identity --query Arn --output text
+      - name: Restore the bootstrap state (re-runs)
+        run: |
+          bucket="opsdesk-tfstate-$(aws sts get-caller-identity --query Account --output text)-${AWS_REGION}"
+          echo "BUCKET=$bucket" >> "$GITHUB_ENV"
+          if aws s3api head-bucket --bucket "$bucket" 2>/dev/null; then
+            aws s3 cp "s3://$bucket/opsdesk/bootstrap.tfstate" terraform/bootstrap/terraform.tfstate || \
+              echo "::warning::Bucket exists but has no bootstrap state; Terraform will try to create it and may report it already exists"
+          else
+            echo "First run: the bucket does not exist yet"
+          fi
+      - name: terraform apply (state bucket)
+        run: |
+          terraform -chdir=terraform/bootstrap init -input=false
+          terraform -chdir=terraform/bootstrap apply -input=false -auto-approve
+      - name: Save the bootstrap state in the bucket
+        if: always()
+        run: |
+          if [[ -f terraform/bootstrap/terraform.tfstate ]] && aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
+            aws s3 cp terraform/bootstrap/terraform.tfstate "s3://$BUCKET/opsdesk/bootstrap.tfstate"
+          fi
+      - name: Summary
+        run: |
+          {
+            echo "### Bootstrap done"
+            echo "- State bucket: \`$BUCKET\`"
+            echo "- Next: Actions -> **Infrastructure** -> Run workflow -> \`apply\`"
+          } >> "$GITHUB_STEP_SUMMARY"

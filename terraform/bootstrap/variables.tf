@@ -21,3 +21,9 @@ variable "create_oidc_provider" {
   type        = bool
   default     = true
 }
+
+variable "manage_github_oidc" {
+  description = "true = also create the GitHub OIDC provider and deploy role (CloudShell path); false = they were created in the IAM console."
+  type        = bool
+  default     = true
+}

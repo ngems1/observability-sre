@@ -2,9 +2,8 @@
 
 Nothing runs on your laptop. **GitHub Actions** runs Terraform, builds and scans the image, deploys to EKS,
 runs the failure drills and tears everything down. It authenticates to AWS with **GitHub OIDC** (short-lived
-credentials, no AWS keys stored anywhere). Everything is Terraform; the only manual AWS step is running the
-`terraform/bootstrap` root once from **AWS CloudShell** (the terminal in the AWS console), which creates the OIDC
-trust, the deploy role and the state bucket.
+credentials, no AWS keys stored anywhere). Everything is Terraform run by GitHub Actions; the only manual AWS step
+is creating the OIDC trust and the deploy role once in the IAM console (GitHub cannot log in before they exist).
 
 ```mermaid
 flowchart LR
@@ -59,21 +58,53 @@ rebuild everything in about 40 minutes. Breakdown and savings recommendations: [
 **1. GitHub** — push the repo (`ngems1/observability-sre`). CI runs right away; the AWS workflows skip themselves
 until step 3 is done.
 
-**2. Bootstrap with Terraform from AWS CloudShell** — AWS console, region **us-east-1**, CloudShell icon (top bar):
+**2. Bootstrap (once)** — GitHub cannot log in to AWS until a role trusts it, so the trust is created once by hand
+in the IAM console (region **us-east-1**); everything after that is Terraform run by GitHub Actions.
 
-```bash
-git clone https://github.com/ngems1/observability-sre.git && cd observability-sre
-bash scripts/aws/setup-cloudshell.sh                 # installs Terraform, Helm, kubectl into ~/bin (once)
-export PATH="$HOME/bin:$PATH"
-terraform -chdir=terraform/bootstrap init
-terraform -chdir=terraform/bootstrap apply           # review the plan, type yes
+*2a. OIDC provider* — IAM → **Identity providers**. If `token.actions.githubusercontent.com` is already listed
+(e.g. from an earlier project), skip this. Otherwise **Add provider** → *OpenID Connect* → Provider URL
+`https://token.actions.githubusercontent.com` → Audience `sts.amazonaws.com` → **Add provider**.
+
+*2b. Deploy role* — IAM → **Roles** → **Create role** → *Web identity* → Identity provider
+`token.actions.githubusercontent.com`, Audience `sts.amazonaws.com`, GitHub organization `ngems1`, GitHub repository
+`observability-sre`, branch `main` → Next → permissions **AdministratorAccess** → Next → Role name
+**`opsdesk-github-deploy`** → **Create role**. Then open the role:
+
+- **Trust relationships** → *Edit trust policy* → replace everything with the policy below (put your 12-digit account
+  ID, top right of the console, in place of `ACCOUNT_ID`) → *Update policy*. It also allows pull requests and the
+  protected `demo` environment, which the workflows use.
+- **Summary** → *Edit* → **Maximum session duration: 2 hours** → *Save* (creating EKS takes longer than 1 hour).
+- Copy the role **ARN** (`arn:aws:iam::ACCOUNT_ID:role/opsdesk-github-deploy`).
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": { "Federated": "arn:aws:iam::ACCOUNT_ID:oidc-provider/token.actions.githubusercontent.com" },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": { "token.actions.githubusercontent.com:aud": "sts.amazonaws.com" },
+        "StringLike": {
+          "token.actions.githubusercontent.com:sub": [
+            "repo:ngems1/observability-sre:ref:refs/heads/main",
+            "repo:ngems1/observability-sre:pull_request",
+            "repo:ngems1/observability-sre:environment:demo"
+          ]
+        }
+      }
+    }
+  ]
+}
 ```
 
-It creates the GitHub OIDC provider, the role `opsdesk-github-deploy` and the bucket
-`opsdesk-tfstate-<account>-us-east-1`, then prints **`deploy_role_arn`**. Defaults: repository
-`ngems1/observability-sre`; if IAM → Identity providers already lists `token.actions.githubusercontent.com`
-(e.g. from Week 3), add `-var create_oidc_provider=false`. Keep a copy of the bootstrap state:
-`aws s3 cp terraform/bootstrap/terraform.tfstate s3://opsdesk-tfstate-<account>-us-east-1/opsdesk/bootstrap.tfstate`.
+*2c. State bucket* — after step 3 below: GitHub → **Actions → Bootstrap → Run workflow** → approve. It runs
+`terraform/bootstrap` (bucket `opsdesk-tfstate-<account>-us-east-1`, versioned, encrypted, TLS-only) and stores that
+root's own state in the bucket, so it can be re-run safely.
+
+The same role and provider are also written as Terraform (`terraform/modules/github_oidc`): with AWS CloudShell
+available, `terraform -chdir=terraform/bootstrap apply` creates the whole bootstrap, role included, instead of 2a–2c.
 
 **3. GitHub → repository Settings**
 
@@ -83,7 +114,7 @@ It creates the GitHub OIDC provider, the role `opsdesk-github-deploy` and the bu
 
 | Variable | Example | Purpose |
 | --- | --- | --- |
-| `AWS_ROLE_ARN` | `arn:aws:iam::123456789012:role/opsdesk-github-deploy` | role GitHub Actions assumes (`deploy_role_arn` from step 2) |
+| `AWS_ROLE_ARN` | `arn:aws:iam::123456789012:role/opsdesk-github-deploy` | role GitHub Actions assumes (ARN from step 2b) |
 | `OWNER` | `sebastien` | `Owner` cost-allocation tag |
 | `ALERT_EMAIL` | `you@example.com` | budget + CloudWatch alarm emails |
 | `ALLOWED_CIDRS` | `["203.0.113.10/32"]` | who can open the app/Grafana: your public IP (https://checkip.amazonaws.com) + `/32`, JSON list |
@@ -101,6 +132,7 @@ and confirm the SNS subscription email AWS sends to `ALERT_EMAIL`.
 
 | Step | GitHub → Actions | Time |
 | --- | --- | --- |
+| 0 | **Bootstrap** → Run workflow → approve (first time only) | ~1 min (state bucket) |
 | 1 | **Infrastructure** → Run workflow → `apply` → approve | ~30 min (EKS ~15, RDS ~8, platform ~10) |
 | 2 | **Release** → Run workflow → approve the deploy | ~8 min (CI, build, Trivy gate, ECR push, Helm, smoke test) |
 | 3 | **Ops** → `load-start` | 1 min (k6 at 5 req/s) |
@@ -116,6 +148,7 @@ After that, every push to `main` runs CI → build → scan → (approval) → d
 | Workflow | Trigger | What it does |
 | --- | --- | --- |
 | **CI** | pull requests; called by Release | pytest + ruff, Docker build, Trivy (deps + image, SARIF to the Security tab), terraform validate, Checkov (Terraform, rendered Helm), helm lint, kubeconform |
+| **Bootstrap** | manual, once | Terraform `bootstrap`: the state bucket (state of the bootstrap root kept in the bucket) |
 | **Infrastructure** | PR / push: plan · manual: apply | Terraform `infra` + `platform` (apply needs `demo` approval) |
 | **Release** | push to `main`, manual | CI → image tagged with the commit SHA → Trivy gate → ECR → Helm `--atomic` → smoke test → automatic `helm rollback` on failure. Skips deploy when the environment is down |
 | **Ops** | manual | `status`, `load-start/stop`, drills 1–4, `errors-on/off`, `rollback` — each run logs timestamps and before/after state as drill evidence |
@@ -150,8 +183,10 @@ On-call steps per alert: [runbook.md](runbook.md).
 ## Troubleshooting
 
 - **Release says "Deploy skipped"** — the environment is down: run Infrastructure (`apply`) first.
-- **`Not authorized to perform sts:AssumeRoleWithWebIdentity`** — `github_repository` in the bootstrap must match the
-  repository exactly (`owner/name`, case-sensitive), and the job must run on `main` or in the `demo` environment.
+- **`Not authorized to perform sts:AssumeRoleWithWebIdentity`** — the trust policy of `opsdesk-github-deploy` must name
+  the repository exactly (`repo:ngems1/observability-sre:...`, case-sensitive) and include the `environment:demo` line;
+  the account ID in the `Federated` ARN must be yours.
+- **`The requested DurationSeconds exceeds the MaxSessionDuration`** — set the role's maximum session duration to 2 hours.
 - **Bootstrap fails with `EntityAlreadyExists` on the OIDC provider** — the account already has one: re-run the
   apply with `-var create_oidc_provider=false`.
 - **EKS version not supported** — set the `eks_version` default in `terraform/infra/variables.tf` to a version in

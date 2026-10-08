@@ -1,11 +1,16 @@
-# One-time bootstrap, run once from AWS CloudShell with your console identity (docs/aws.md, step 2):
+# One-time bootstrap (docs/aws.md, step 2):
 #   1. the S3 bucket that holds the Terraform state of terraform/infra and terraform/platform
-#   2. the GitHub OIDC trust + the role GitHub Actions assumes (no AWS keys anywhere)
-# Everything after this runs from GitHub Actions. Local state is fine here (created once, rarely changed);
-# keep a copy in the bucket: aws s3 cp terraform.tfstate s3://<state_bucket>/opsdesk/bootstrap.tfstate
+#   2. optionally, the GitHub OIDC trust + the role GitHub Actions assumes (no AWS keys anywhere)
+#
+# Two ways to run it:
+#   - GitHub Actions -> Bootstrap (manage_github_oidc = false): the OIDC trust and role were created once in the
+#     IAM console (GitHub cannot log in before they exist); this run creates the state bucket. The workflow keeps
+#     this root's state in the bucket itself (opsdesk/bootstrap.tfstate), so it can be re-run safely.
+#   - AWS CloudShell with your console identity (manage_github_oidc = true): creates everything, role included.
 
 module "github_oidc" {
   source = "../modules/github_oidc"
+  count  = var.manage_github_oidc ? 1 : 0
 
   github_repository    = var.github_repository
   role_name            = "${var.project}-github-deploy"

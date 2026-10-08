@@ -23,7 +23,7 @@ fi
 
 step "1/4 Terraform state bucket (${STATE_BUCKET})"
 aws s3api head-bucket --bucket "$STATE_BUCKET" 2>/dev/null || \
-  die "state bucket missing: run the bootstrap first (terraform -chdir=terraform/bootstrap init && terraform -chdir=terraform/bootstrap apply)"
+  die "state bucket missing: run Actions -> Bootstrap first (or terraform -chdir=terraform/bootstrap apply in CloudShell)"
 echo "exists"
 
 step "2/4 Infrastructure (terraform/infra) - about 20 minutes on first run"
