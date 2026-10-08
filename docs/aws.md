@@ -2,8 +2,9 @@
 
 Nothing runs on your laptop. **GitHub Actions** runs Terraform, builds and scans the image, deploys to EKS,
 runs the failure drills and tears everything down. It authenticates to AWS with **GitHub OIDC** (short-lived
-credentials, no AWS keys stored anywhere). The only manual AWS step is a one-time CloudFormation stack created
-from the AWS console. (AWS CloudShell scripts in `scripts/aws/` remain as a fallback; see the end.)
+credentials, no AWS keys stored anywhere). Everything is Terraform; the only manual AWS step is running the
+`terraform/bootstrap` root once from **AWS CloudShell** (the terminal in the AWS console), which creates the OIDC
+trust, the deploy role and the state bucket.
 
 ```mermaid
 flowchart LR
@@ -41,7 +42,7 @@ flowchart LR
 
 | Layer | Terraform root | What it creates |
 | --- | --- | --- |
-| State | `terraform/bootstrap` | S3 bucket for state (versioned, encrypted, TLS-only, native S3 locking) |
+| Bootstrap (once) | `terraform/bootstrap` → `terraform/modules/github_oidc` | GitHub OIDC provider, deploy role `opsdesk-github-deploy` (trusts only this repo's `main`, PRs and the `demo` environment), S3 state bucket (versioned, encrypted, TLS-only, native S3 locking) |
 | Infrastructure | `terraform/infra` → `terraform/modules/*` (network, kms, eks, ecr, sqs, rds, secrets, irsa, observability, security) | VPC (1 NAT, flow logs), EKS + managed node group, ECR, RDS PostgreSQL, SQS + DLQ, KMS key, IRSA roles, Secrets Manager, CloudWatch log groups + alarms + SNS, AWS Budget; Day-4 toggles for GuardDuty, Security Hub, Inspector, CloudTrail |
 | Platform | `terraform/platform` | gp3 StorageClass, namespaces with Pod Security levels, AWS Load Balancer Controller, External Secrets Operator, metrics-server, Cluster Autoscaler, Fluent Bit → CloudWatch, kube-prometheus-stack (Grafana on the ALB at `/grafana`), Tempo, OpenTelemetry Collector, the OpsDesk dashboard |
 | App | Helm (`helm/opsdesk` + `values-eks.yaml`) | ticket-api, ticket-worker, Ingress (ALB), ExternalSecret, IRSA service accounts, NetworkPolicies, ServiceMonitors, HPA, PDB |
@@ -53,24 +54,26 @@ ALB ~$0.60, RDS db.t4g.micro ~$0.40, EBS volumes ~$0.40, public IPv4 addresses ~
 Secrets Manager and CloudWatch. **Run the Destroy workflow whenever you stop working**; Infrastructure + Release
 rebuild everything in about 40 minutes. Breakdown and savings recommendations: [cost.md](cost.md).
 
-## One-time setup (browser only)
+## One-time setup
 
-**1. GitHub** — push the repo (e.g. `ngems1/opsdesk`). The CI workflow runs on pull requests right away; the AWS
-workflows skip themselves until step 3 is done.
+**1. GitHub** — push the repo (`ngems1/observability-sre`). CI runs right away; the AWS workflows skip themselves
+until step 3 is done.
 
-**2. AWS console → CloudFormation** (region **us-east-1**) → *Create stack* → *With new resources* →
-*Upload a template file* → `bootstrap/github-oidc-bootstrap.yaml`:
+**2. Bootstrap with Terraform from AWS CloudShell** — AWS console, region **us-east-1**, CloudShell icon (top bar):
 
-| Parameter | Value |
-| --- | --- |
-| Stack name | `opsdesk-bootstrap` |
-| GitHubOwner | your GitHub user, e.g. `ngems1` |
-| GitHubRepo | `opsdesk` |
-| CreateOIDCProvider | `true` (use `false` only if IAM → Identity providers already lists `token.actions.githubusercontent.com`) |
+```bash
+git clone https://github.com/ngems1/observability-sre.git && cd observability-sre
+bash scripts/aws/setup-cloudshell.sh                 # installs Terraform, Helm, kubectl into ~/bin (once)
+export PATH="$HOME/bin:$PATH"
+terraform -chdir=terraform/bootstrap init
+terraform -chdir=terraform/bootstrap apply           # review the plan, type yes
+```
 
-Tick *"I acknowledge that AWS CloudFormation might create IAM resources with custom names"* → Submit.
-When it shows `CREATE_COMPLETE`, copy **DeployRoleArn** from the *Outputs* tab. The stack also creates the
-Terraform state bucket `opsdesk-tfstate-<account>-us-east-1`.
+It creates the GitHub OIDC provider, the role `opsdesk-github-deploy` and the bucket
+`opsdesk-tfstate-<account>-us-east-1`, then prints **`deploy_role_arn`**. Defaults: repository
+`ngems1/observability-sre`; if IAM → Identity providers already lists `token.actions.githubusercontent.com`
+(e.g. from Week 3), add `-var create_oidc_provider=false`. Keep a copy of the bootstrap state:
+`aws s3 cp terraform/bootstrap/terraform.tfstate s3://opsdesk-tfstate-<account>-us-east-1/opsdesk/bootstrap.tfstate`.
 
 **3. GitHub → repository Settings**
 
@@ -80,7 +83,7 @@ Terraform state bucket `opsdesk-tfstate-<account>-us-east-1`.
 
 | Variable | Example | Purpose |
 | --- | --- | --- |
-| `AWS_ROLE_ARN` | `arn:aws:iam::123456789012:role/opsdesk-github-deploy` | role GitHub Actions assumes (from step 2) |
+| `AWS_ROLE_ARN` | `arn:aws:iam::123456789012:role/opsdesk-github-deploy` | role GitHub Actions assumes (`deploy_role_arn` from step 2) |
 | `OWNER` | `sebastien` | `Owner` cost-allocation tag |
 | `ALERT_EMAIL` | `you@example.com` | budget + CloudWatch alarm emails |
 | `ALLOWED_CIDRS` | `["203.0.113.10/32"]` | who can open the app/Grafana: your public IP (https://checkip.amazonaws.com) + `/32`, JSON list |
@@ -112,7 +115,7 @@ After that, every push to `main` runs CI → build → scan → (approval) → d
 
 | Workflow | Trigger | What it does |
 | --- | --- | --- |
-| **CI** | pull requests; called by Release | pytest + ruff, Docker build, Trivy (deps + image, SARIF to the Security tab), terraform validate, Checkov (Terraform, CloudFormation, rendered Helm), helm lint, kubeconform |
+| **CI** | pull requests; called by Release | pytest + ruff, Docker build, Trivy (deps + image, SARIF to the Security tab), terraform validate, Checkov (Terraform, rendered Helm), helm lint, kubeconform |
 | **Infrastructure** | PR / push: plan · manual: apply | Terraform `infra` + `platform` (apply needs `demo` approval) |
 | **Release** | push to `main`, manual | CI → image tagged with the commit SHA → Trivy gate → ECR → Helm `--atomic` → smoke test → automatic `helm rollback` on failure. Skips deploy when the environment is down |
 | **Ops** | manual | `status`, `load-start/stop`, drills 1–4, `errors-on/off`, `rollback` — each run logs timestamps and before/after state as drill evidence |
@@ -147,8 +150,10 @@ On-call steps per alert: [runbook.md](runbook.md).
 ## Troubleshooting
 
 - **Release says "Deploy skipped"** — the environment is down: run Infrastructure (`apply`) first.
-- **`Not authorized to perform sts:AssumeRoleWithWebIdentity`** — `GitHubOwner`/`GitHubRepo` in the CloudFormation
-  stack must match the repository exactly (case-sensitive), and the job must run on `main` or in the `demo` environment.
+- **`Not authorized to perform sts:AssumeRoleWithWebIdentity`** — `github_repository` in the bootstrap must match the
+  repository exactly (`owner/name`, case-sensitive), and the job must run on `main` or in the `demo` environment.
+- **Bootstrap fails with `EntityAlreadyExists` on the OIDC provider** — the account already has one: re-run the
+  apply with `-var create_oidc_provider=false`.
 - **EKS version not supported** — set the `eks_version` default in `terraform/infra/variables.tf` to a version in
   *standard support* (extended support costs extra).
 - **`terraform fmt` warning in CI** — run the *Terraform fmt* workflow; it commits the formatting.
@@ -163,7 +168,6 @@ On-call steps per alert: [runbook.md](runbook.md).
 
 ## Fallback: AWS CloudShell
 
-The same scripts the workflows call can run in AWS CloudShell (a browser terminal, nothing local):
-`git clone`, `bash scripts/aws/setup-cloudshell.sh`, copy the two `terraform.tfvars.example` files, then
-`bash scripts/aws/up.sh` / `down.sh`. Use one path or the other for a given environment (the identity that
+The same scripts the workflows call can run in AWS CloudShell (after the bootstrap): copy the two
+`terraform.tfvars.example` files, then `bash scripts/aws/up.sh` / `down.sh`. Use one path or the other for a given environment (the identity that
 creates the cluster becomes its first admin).

@@ -6,7 +6,7 @@ with the code. Trivy image and dependency scans run in CI on every pull request 
 
 | Scan | Passed | Failed | Accepted exceptions |
 | --- | --- | --- | --- |
-| Terraform | 183 | 0 | 25 |
+| Terraform | 193 | 0 | 26 |
 | Kubernetes (rendered Helm, EKS values) | 181 | 0 | 8 |
 
 ## Accepted exceptions
@@ -23,6 +23,7 @@ with the code. Trivy image and dependency scans run in CI on every pull request 
 | Kubernetes | CKV_K8S_43 | `Deployment.opsdesk.opsdesk-worker` | ECR tags are immutable (commit SHA), so a tag pins one image like a digest |
 | Terraform | CKV2_AWS_10 | `aws_cloudtrail.main` | Trail goes to S3 only (CloudWatch delivery doubles log cost); query with Athena if needed |
 | Terraform | CKV2_AWS_3 | `aws_guardduty_detector.main` | Single-account demo, no AWS Organization |
+| Terraform | CKV_AWS_274 | `aws_iam_role_policy_attachment.deploy_admin` (bootstrap) | GitHub deploy role is admin in the single-purpose lab account; trust is limited to one repository's `main`, pull requests and the approved `demo` environment (see Known gaps) |
 | Terraform | CKV2_AWS_57 | `aws_secretsmanager_secret.app` | Demo API keys rotate with `terraform apply -replace=random_password.api_key`; DB credentials are rotated by RDS |
 | Terraform | CKV2_AWS_62 | `aws_s3_bucket.state` | No consumers for S3 event notifications on the state bucket |
 | Terraform | CKV2_AWS_62 | `aws_s3_bucket.trail` | No event consumers |

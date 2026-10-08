@@ -35,4 +35,4 @@ terraform version | head -1
 helm version --short
 kubectl version --client | head -1
 docker version --format 'docker {{.Server.Version}}' 2>/dev/null || echo "docker: not available in this CloudShell session"
-echo "Ready. Next: copy the two terraform.tfvars.example files, then run scripts/aws/up.sh"
+echo "Ready. Next (once): terraform -chdir=terraform/bootstrap init && terraform -chdir=terraform/bootstrap apply"

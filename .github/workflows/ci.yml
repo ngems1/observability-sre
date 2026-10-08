@@ -112,8 +112,6 @@ jobs:
       - run: pip install checkov
       - name: Checkov - Terraform (exceptions are justified inline)
         run: checkov -d terraform --framework terraform --quiet --compact --skip-path '\.terraform'
-      - name: Checkov - CloudFormation bootstrap
-        run: checkov -f bootstrap/github-oidc-bootstrap.yaml --framework cloudformation --quiet --compact
 
   helm:
     name: Helm lint + kubeconform + Checkov

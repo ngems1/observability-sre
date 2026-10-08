@@ -1,39 +1,18 @@
-# One-time bootstrap: the S3 bucket that holds Terraform state for infra/ and platform/.
-# Local state is fine here (one bucket, created once). Run from AWS CloudShell:
-#   terraform -chdir=terraform/bootstrap init && terraform -chdir=terraform/bootstrap apply
+# One-time bootstrap, run once from AWS CloudShell with your console identity (docs/aws.md, step 2):
+#   1. the S3 bucket that holds the Terraform state of terraform/infra and terraform/platform
+#   2. the GitHub OIDC trust + the role GitHub Actions assumes (no AWS keys anywhere)
+# Everything after this runs from GitHub Actions. Local state is fine here (created once, rarely changed);
+# keep a copy in the bucket: aws s3 cp terraform.tfstate s3://<state_bucket>/opsdesk/bootstrap.tfstate
 
-terraform {
-  required_version = ">= 1.10.0"
-  required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = "~> 5.95"
-    }
-  }
+module "github_oidc" {
+  source = "../modules/github_oidc"
+
+  github_repository    = var.github_repository
+  role_name            = "${var.project}-github-deploy"
+  create_oidc_provider = var.create_oidc_provider
 }
 
-variable "region" {
-  type    = string
-  default = "us-east-1"
-}
-
-variable "project" {
-  type    = string
-  default = "opsdesk"
-}
-
-provider "aws" {
-  region = var.region
-  default_tags {
-    tags = {
-      Project   = var.project
-      Env       = "demo"
-      ManagedBy = "terraform"
-      Component = "tf-state"
-    }
-  }
-}
-
+# ------------------------------------------------------------------ Terraform state bucket
 data "aws_caller_identity" "current" {}
 
 resource "aws_s3_bucket" "state" {
@@ -105,8 +84,4 @@ resource "aws_s3_bucket_lifecycle_configuration" "state" {
       days_after_initiation = 7
     }
   }
-}
-
-output "state_bucket" {
-  value = aws_s3_bucket.state.bucket
 }
