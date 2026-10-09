@@ -69,7 +69,7 @@ Closing it needs security groups for pods or a node group per environment ([find
 ## Cost while it runs (approximate, us-east-1 on-demand)
 
 About **$13–15 per day** for both environments: EKS control plane ~$2.40, 3× m5.large ~$6.90, NAT ~$1.10 + data,
-2 ALBs ~$1.20, 2 RDS db.t4g.micro ~$0.80, EBS volumes ~$0.40, public IPv4 addresses ~$0.60, small amounts for KMS,
+2 ALBs ~$1.20, 2 RDS db.t3.micro ~$0.80, EBS volumes ~$0.40, public IPv4 addresses ~$0.60, small amounts for KMS,
 Secrets Manager and CloudWatch. The second environment adds only ~$1.50/day because the cluster is shared. **Run the Destroy workflow whenever you stop working**; Infrastructure + Release
 rebuild everything in about 40 minutes. Breakdown and savings recommendations: [cost.md](cost.md).
 
@@ -218,6 +218,9 @@ On-call steps per alert: [runbook.md](runbook.md).
   `repo:ngems1/observability-sre:*` never matches. Find the real value in CloudTrail → Event history →
   `AssumeRoleWithWebIdentity` (the failed event). Also check that `AWS_ROLE_ARN` names the role you edited and that the
   account ID in the `Federated` ARN is yours.
+- **RDS `InsufficientDBInstanceCapacity`** — AWS has no capacity for that DB class in the VPC's two AZs right now.
+  Set the repository variable `DB_INSTANCE_CLASS` to another class (default `db.t3.micro`; e.g. `db.t3.small`,
+  `db.t4g.micro`) and re-run Infrastructure → apply: everything already created is kept.
 - **`The requested DurationSeconds exceeds the MaxSessionDuration`** — set the role's maximum session duration to 2 hours.
 - **Bootstrap fails with `EntityAlreadyExists` on the OIDC provider** — the account already has one: re-run the
   apply with `-var create_oidc_provider=false`.

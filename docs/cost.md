@@ -19,7 +19,7 @@ daily granularity; then *Group by* tag `Env` to split `dev`, `prod` and `shared`
 | NAT gateway | $0.045 / h + $0.045 / GB | 1 gateway, < 1 GB/day | $1.10 | |
 | Application Load Balancers | ~$0.0225 / h + LCUs | 2 ALBs: dev, prod (+ Grafana) | ~$1.20 | |
 | Public IPv4 addresses | $0.005 / h each | NAT + 2 ALBs × 2 AZs = 5 | $0.60 | |
-| RDS PostgreSQL | ~$0.016 / h each | 2 × db.t4g.micro (dev, prod), single-AZ, 20 GB gp3 | ~$0.90 | |
+| RDS PostgreSQL | ~$0.017 / h each | 2 × db.t3.micro (dev, prod), single-AZ, 20 GB gp3 | ~$0.90 | |
 | EBS volumes | $0.08 / GB-month (gp3) | node disks + Prometheus 20 GiB + Tempo 10 GiB | ~$0.25 | |
 | KMS, Secrets Manager, CloudWatch Logs, SQS | small | 1 key, 5 secrets, 2 queues + DLQs, 7-day logs | ~$0.25 | |
 | **Total** | | | **≈ $13.60** | |
@@ -99,7 +99,7 @@ staying `Running` during a load test.
 | 1 + 2 + 3. Two nodes | 2 × Spot | 175 | ≈ $65 |
 
 Cost controls already in the code: tags `Project`, `Env`, `Owner` on every resource (Terraform `default_tags`), an
-AWS Budget with email alerts, single NAT gateway, single-AZ `db.t4g.micro` per environment, both environments on one cluster, no interface endpoints by default, and
+AWS Budget with email alerts, single NAT gateway, single-AZ `db.t3.micro` per environment, both environments on one cluster, no interface endpoints by default, and
 EKS on a version in standard support (extended support costs $0.60 / h per cluster, six times more).
 
 ## Sources

@@ -98,8 +98,9 @@ variable "admin_principal_arns" {
 
 # ---------------------------------------------------------------- RDS
 variable "db_instance_class" {
-  type    = string
-  default = "db.t4g.micro"
+  description = "RDS class for each environment. db.t3.micro: widely available in us-east-1 (db.t4g.micro hit InsufficientDBInstanceCapacity)."
+  type        = string
+  default     = "db.t3.micro"
 }
 
 variable "db_allocated_storage_gb" {
