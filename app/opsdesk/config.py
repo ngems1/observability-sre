@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     sqs_wait_time_s: int = 10
     sqs_visibility_timeout_s: int = 30
     sqs_max_receive_count: int = 3  # must match the queue's redrive policy
+    worker_concurrency: int = 5  # messages of one receive batch handled in parallel (= db_pool_size)
     queue_metrics_interval_s: int = 30  # ticket-api samples queue depth (main + DLQ); 0 = off
 
     # Notifications: empty webhook = "log only" mode (no real Slack call)

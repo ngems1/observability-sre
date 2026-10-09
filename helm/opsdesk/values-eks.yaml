@@ -32,7 +32,7 @@ api:
     targetCPUUtilizationPercentage: 70
 
 worker:
-  replicas: 1
+  replicas: 2                         # one worker drained ~1 message at a time; 2 x 5 threads clears a load-test backlog
 
 ingress:
   enabled: true

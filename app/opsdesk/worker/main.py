@@ -14,6 +14,7 @@ import random
 import signal
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -48,6 +49,7 @@ class Worker:
         self.Session = session_factory()
         self.stop = threading.Event()
         self.last_poll = time.time()
+        self.pool = ThreadPoolExecutor(max_workers=max(1, settings.worker_concurrency), thread_name_prefix="handler")
 
     # ------------------------------------------------------------- processing
     def handle(self, message: dict) -> str:
@@ -151,8 +153,8 @@ class Worker:
                 messages = self.queue.receive()
                 self.last_poll = time.time()
                 WORKER_LAST_POLL.set(self.last_poll)
-                for message in messages:
-                    self.handle(message)
+                # a batch (up to 10) is handled in parallel; each handle() deletes its own message on success
+                list(self.pool.map(self.handle, messages))
                 update_pool_metrics()
             except Exception as exc:  # noqa: BLE001
                 dep = record_failure(exc) or record_failure(exc, "sqs")  # receive() failures are SQS
@@ -210,6 +212,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
     worker.run()
+    worker.pool.shutdown(wait=True)
     trace.get_tracer_provider().shutdown()
 
 
