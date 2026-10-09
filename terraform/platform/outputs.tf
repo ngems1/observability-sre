@@ -13,13 +13,13 @@ output "next_steps" {
 }
 
 # Per environment, merged on top of the infra helm_values by scripts/aws/deploy-app.sh.
-# Each environment gets its own ALB (ingress group opsdesk-<env>); Grafana sits on prod's.
+# Each environment gets its own ALB (ingress group opsdesk-<env>); both route /grafana to the shared Grafana.
 output "helm_values" {
   value = {
     for env, e in local.environments : env => yamlencode({
       config = {
         OPSDESK_OTEL_EXPORTER_OTLP_ENDPOINT = "http://otel-collector.${kubernetes_namespace_v1.observability.metadata[0].name}.svc.cluster.local:4318"
-        OPSDESK_GRAFANA_URL                 = env == "prod" ? "/grafana" : null # Grafana is on prod's ALB only
+        OPSDESK_GRAFANA_URL                 = "/grafana" # the shared Grafana, routed on each environment's ALB
       }
       ingress = {
         annotations = merge(local.alb_common_annotations, {

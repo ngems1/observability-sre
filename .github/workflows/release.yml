@@ -134,6 +134,7 @@ jobs:
           {
             echo "### dev: opsdesk:${{ needs.build.outputs.tag }}"
             echo "- Web UI: http://${host}/"
+            echo "- Grafana: http://${host}/grafana (Environment dropdown: opsdesk-dev; login in Secrets Manager \`opsdesk/grafana\`)"
             echo "- Next: approve **Deploy to prod** to promote this exact image"
           } >> "$GITHUB_STEP_SUMMARY"
 

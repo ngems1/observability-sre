@@ -8,7 +8,7 @@ is creating the OIDC trust and the deploy role once in the IAM console (GitHub c
 ```mermaid
 flowchart LR
   user([Your browser<br/>allowed_cidrs only]) -->|HTTP :80| albp[ALB opsdesk-prod<br/>app + /grafana]
-  user --> albd[ALB opsdesk-dev]
+  user --> albd[ALB opsdesk-dev<br/>app + /grafana]
   subgraph vpc[VPC 10.40.0.0/16 · 2 AZs · one shared EKS cluster "opsdesk"]
     subgraph prod[namespace opsdesk-prod · quota · NetworkPolicies]
       apip[ticket-api x2-6] --- workp[ticket-worker]
@@ -28,6 +28,7 @@ flowchart LR
   albp --> apip
   albp -->|/grafana| graf
   albd --> apid
+  albd -->|/grafana| graf
   apip --> rdsp
   apid --> rdsd
   apip --> sqsp[[SQS opsdesk-prod + DLQ]] --> workp
@@ -63,7 +64,7 @@ Closing it needs security groups for pods or a node group per environment ([find
 | --- | --- | --- |
 | Bootstrap (once) | `terraform/bootstrap` → `terraform/modules/github_oidc` | S3 state bucket (versioned, encrypted, TLS-only, native S3 locking); optionally the GitHub OIDC provider + deploy role |
 | Infrastructure | `terraform/infra` → shared modules (network, kms, eks, ecr, observability, irsa, security) + `modules/environment` × dev, prod (sqs, rds, secrets, IAM, log group, alarms) | VPC (1 NAT, flow logs), EKS + managed node group, ECR, KMS key, SNS, AWS Budget, Day-4 security toggles; per environment: RDS, SQS + DLQ, secret, IRSA roles, log group, alarms |
-| Platform | `terraform/platform` | gp3 StorageClass, namespaces `opsdesk-dev` / `opsdesk-prod` with Pod Security, ResourceQuota and LimitRange, AWS Load Balancer Controller, External Secrets Operator, metrics-server, Cluster Autoscaler, Fluent Bit → CloudWatch (log group per namespace), kube-prometheus-stack (Alertmanager routes per environment, Grafana on prod's ALB at `/grafana`), Tempo, OpenTelemetry Collector, both dashboards |
+| Platform | `terraform/platform` | gp3 StorageClass, namespaces `opsdesk-dev` / `opsdesk-prod` with Pod Security, ResourceQuota and LimitRange, AWS Load Balancer Controller, External Secrets Operator, metrics-server, Cluster Autoscaler, Fluent Bit → CloudWatch (log group per namespace), kube-prometheus-stack (Alertmanager routes per environment, Grafana at `/grafana` on both environments' ALBs), Tempo, OpenTelemetry Collector, both dashboards |
 | App | Helm (`helm/opsdesk` + `values-eks.yaml` + `values-dev.yaml` / `values-prod.yaml`) | one release per namespace: ticket-api, ticket-worker, Ingress (ALB), ExternalSecret + SecretStore, IRSA service accounts, NetworkPolicies, ServiceMonitors, PrometheusRule, HPA, PDB |
 
 ## Cost while it runs (approximate, us-east-1 on-demand)
@@ -159,7 +160,7 @@ and confirm the SNS subscription email AWS sends to `ALERT_EMAIL`.
 | 2 | **Release** → Run workflow → dev deploys by itself → approve **Promote to prod** | ~8 min dev + ~5 min prod (same image) |
 | 3 | **Ops** → environment `dev` → `load-start`, then `prod` → `load-start` | 1 min each (k6 at 5 req/s inside each namespace) |
 
-The Release summary shows each environment's **Web UI** URL; Grafana is on prod's (`http://<prod-alb>/grafana`).
+The Release summary shows each environment's **Web UI** and **Grafana** URLs (`http://<alb>/grafana`: one shared Grafana on both load balancers; pick the environment with the dashboards' *Environment* dropdown).
 Logins live in **AWS console → Secrets Manager**: `opsdesk-dev/app` and `opsdesk-prod/app` (`bootstrap_users` =
 `name:role:api_key` entries; paste a key on the sign-in page) and `opsdesk/grafana`.
 

@@ -252,7 +252,7 @@ resource "helm_release" "kube_prometheus_stack" {
         path             = "/grafana"
         pathType         = "Prefix"
         hosts            = []
-        # Grafana is a platform tool: it shares prod's load balancer (dev gets its own, app only)
+        # Grafana is a platform tool: one instance, reachable at /grafana on both environments' load balancers
         annotations = merge(local.alb_common_annotations, {
           "alb.ingress.kubernetes.io/group.name"       = "opsdesk-prod"
           "alb.ingress.kubernetes.io/group.order"      = "10"
@@ -282,6 +282,39 @@ resource "helm_release" "kube_prometheus_stack" {
   })]
 
   depends_on = [helm_release.aws_lb_controller, helm_release.tempo, kubernetes_secret_v1.alertmanager_opsdesk]
+}
+
+# The same (single) Grafana also on dev's load balancer at /grafana, so each environment's URL has its
+# monitoring link. Pick the environment with the dashboards' "Environment" dropdown.
+resource "kubernetes_ingress_v1" "grafana_dev" {
+  metadata {
+    name      = "grafana-dev"
+    namespace = kubernetes_namespace_v1.observability.metadata[0].name
+    annotations = merge(local.alb_common_annotations, {
+      "alb.ingress.kubernetes.io/group.name"       = "opsdesk-dev"
+      "alb.ingress.kubernetes.io/group.order"      = "10"
+      "alb.ingress.kubernetes.io/healthcheck-path" = "/grafana/api/health"
+    })
+  }
+  spec {
+    ingress_class_name = "alb"
+    rule {
+      http {
+        path {
+          path      = "/grafana"
+          path_type = "Prefix"
+          backend {
+            service {
+              name = "${helm_release.kube_prometheus_stack.name}-grafana"
+              port {
+                number = 80
+              }
+            }
+          }
+        }
+      }
+    }
+  }
 }
 
 # Same dashboards as Docker Desktop, loaded by the Grafana sidecar:
