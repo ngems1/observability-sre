@@ -108,10 +108,10 @@ in the IAM console (region **us-east-1**); everything after that is Terraform ru
         "StringEquals": { "token.actions.githubusercontent.com:aud": "sts.amazonaws.com" },
         "StringLike": {
           "token.actions.githubusercontent.com:sub": [
-            "repo:ngems1/observability-sre:ref:refs/heads/main",
-            "repo:ngems1/observability-sre:pull_request",
-            "repo:ngems1/observability-sre:environment:dev",
-            "repo:ngems1/observability-sre:environment:prod"
+            "repo:ngems1@330211773/observability-sre@1410480281:ref:refs/heads/main",
+            "repo:ngems1@330211773/observability-sre@1410480281:pull_request",
+            "repo:ngems1@330211773/observability-sre@1410480281:environment:dev",
+            "repo:ngems1@330211773/observability-sre@1410480281:environment:prod"
           ]
         }
       }
@@ -212,9 +212,12 @@ On-call steps per alert: [runbook.md](runbook.md).
 ## Troubleshooting
 
 - **Release says "Deploy skipped"** — the environment is down: run Infrastructure (`apply`) first.
-- **`Not authorized to perform sts:AssumeRoleWithWebIdentity`** — the trust policy of `opsdesk-github-deploy` must name
-  the repository exactly (`repo:ngems1/observability-sre:...`, case-sensitive) and include the `environment:dev` and
-  `environment:prod` lines; the account ID in the `Federated` ARN must be yours.
+- **`Not authorized to perform sts:AssumeRoleWithWebIdentity`** — the `sub` patterns in the role's trust policy must
+  match the token exactly (case-sensitive). GitHub writes this repository's subject with immutable owner and
+  repository IDs: `repo:ngems1@330211773/observability-sre@1410480281:environment:prod`, so a pattern like
+  `repo:ngems1/observability-sre:*` never matches. Find the real value in CloudTrail → Event history →
+  `AssumeRoleWithWebIdentity` (the failed event). Also check that `AWS_ROLE_ARN` names the role you edited and that the
+  account ID in the `Federated` ARN is yours.
 - **`The requested DurationSeconds exceeds the MaxSessionDuration`** — set the role's maximum session duration to 2 hours.
 - **Bootstrap fails with `EntityAlreadyExists` on the OIDC provider** — the account already has one: re-run the
   apply with `-var create_oidc_provider=false`.

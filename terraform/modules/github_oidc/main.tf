@@ -9,7 +9,7 @@ locals {
   oidc_provider_arn = var.create_oidc_provider ? aws_iam_openid_connect_provider.github[0].arn : "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:oidc-provider/${local.oidc_url}"
 
   # Who may assume the role: the main branch, pull requests and the dev / prod environments of ONE repository
-  allowed_subjects = [for s in var.allowed_subjects : "repo:${var.github_repository}:${s}"]
+  allowed_subjects = [for s in var.allowed_subjects : "repo:${coalesce(var.subject_repository, var.github_repository)}:${s}"]
 }
 
 # Only one GitHub provider can exist per account: set create_oidc_provider = false if IAM already has it

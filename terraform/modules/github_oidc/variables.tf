@@ -7,6 +7,12 @@ variable "github_repository" {
   }
 }
 
+variable "subject_repository" {
+  description = "The repository as it appears in the token's sub claim, if GitHub sends immutable IDs (e.g. ngems1@330211773/observability-sre@1410480281). null = github_repository."
+  type        = string
+  default     = null
+}
+
 variable "role_name" {
   description = "Name of the IAM role GitHub Actions assumes (goes into the AWS_ROLE_ARN repository variable)."
   type        = string

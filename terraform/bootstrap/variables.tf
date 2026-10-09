@@ -27,3 +27,9 @@ variable "manage_github_oidc" {
   type        = bool
   default     = true
 }
+
+variable "github_subject_repository" {
+  description = "Repository as written in the GitHub OIDC sub claim when it carries immutable IDs (owner@id/name@id); null = github_repository."
+  type        = string
+  default     = "ngems1@330211773/observability-sre@1410480281"
+}

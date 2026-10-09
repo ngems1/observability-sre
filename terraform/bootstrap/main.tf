@@ -13,6 +13,7 @@ module "github_oidc" {
   count  = var.manage_github_oidc ? 1 : 0
 
   github_repository    = var.github_repository
+  subject_repository   = var.github_subject_repository
   role_name            = "${var.project}-github-deploy"
   create_oidc_provider = var.create_oidc_provider
 }
