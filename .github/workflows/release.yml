@@ -43,12 +43,17 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
       - id: check
         run: |
+          # "Up" means a COMPLETE Infrastructure apply: the cluster exists AND both Terraform roots wrote their
+          # helm_values output (a failed or half-finished apply leaves the cluster but not the outputs).
+          bucket="opsdesk-tfstate-$(aws sts get-caller-identity --query Account --output text)-${AWS_REGION}"
+          outputs_ok() { aws s3 cp "s3://${bucket}/opsdesk/$1.tfstate" - 2>/dev/null | jq -e '.outputs.helm_values' >/dev/null; }
           if aws eks describe-cluster --name opsdesk >/dev/null 2>&1 \
+             && outputs_ok infra && outputs_ok platform \
              && repo=$(aws ecr describe-repositories --repository-names opsdesk --query 'repositories[0].repositoryUri' --output text 2>/dev/null); then
             echo "up=true" >> "$GITHUB_OUTPUT"; echo "repo=$repo" >> "$GITHUB_OUTPUT"
           else
             echo "up=false" >> "$GITHUB_OUTPUT"
-            echo "::notice title=Deploy skipped::AWS environment is down. Run the Infrastructure workflow (apply), then re-run Release."
+            echo "::notice title=Deploy skipped::AWS environment is down or the last Infrastructure apply did not finish. Run Infrastructure (apply) until it is green, then re-run Release."
           fi
 
   build:
@@ -113,6 +118,11 @@ jobs:
         run: |
           source scripts/aws/lib.sh
           kubeconfig
+          # First deploy into an empty namespace: --atomic already removed the failed release, nothing to roll back
+          if ! helm status opsdesk -n "$APP_NS" >/dev/null 2>&1; then
+            echo "::warning::dev: no previous release to roll back to (first deploy). Fix the error above and re-run."
+            exit 0
+          fi
           helm rollback opsdesk 0 -n "$APP_NS" --wait && echo "::warning::dev rolled back to the previous release"
           helm history opsdesk -n "$APP_NS" --max 5
       - name: Summary
@@ -155,6 +165,11 @@ jobs:
         run: |
           source scripts/aws/lib.sh
           kubeconfig
+          # First deploy into an empty namespace: --atomic already removed the failed release, nothing to roll back
+          if ! helm status opsdesk -n "$APP_NS" >/dev/null 2>&1; then
+            echo "::warning::prod: no previous release to roll back to (first deploy). Fix the error above and re-run."
+            exit 0
+          fi
           helm rollback opsdesk 0 -n "$APP_NS" --wait && echo "::warning::prod rolled back to the previous release"
           helm history opsdesk -n "$APP_NS" --max 5
       - name: Summary
