@@ -347,7 +347,7 @@ def create_app(settings: Settings | None = None, queue: Queue | None = None) -> 
         if body.assignee_id is not None:
             target = session.get(User, body.assignee_id)
             if target is None or target.role == "requester":
-                raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "assignee must be an approver or admin")
+                raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "assignee must be an approver or admin")
         old = ticket.assignee_id
         ticket.assignee_id = body.assignee_id
         audit(session, ticket.id, "assigned", user, old={"assignee_id": old}, new={"assignee_id": body.assignee_id})

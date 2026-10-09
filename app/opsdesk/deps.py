@@ -100,7 +100,7 @@ def classify(exc: BaseException) -> str:
             return "dns"
         if isinstance(e, ConnectionRefusedError):
             return "refused"
-        if isinstance(e, (ConnectionResetError, BrokenPipeError)):
+        if isinstance(e, ConnectionResetError | BrokenPipeError):
             return "connection_lost"
         if mod == "botocore":
             if name == "ClientError":
