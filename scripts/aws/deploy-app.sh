@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Build the image, push it to ECR with an immutable tag, deploy with Helm (--atomic), smoke test.
-# Stage 3 moves exactly these steps into GitHub Actions (OIDC, Trivy gate, protected environment).
-#   bash scripts/aws/deploy-app.sh            # build + deploy
-#   TAG=<existing-tag> bash scripts/aws/deploy-app.sh --no-build
+# GitHub Actions (Release) runs it with --no-build: once for dev, then the same tag for prod after approval.
+#   APP_ENV=dev  bash scripts/aws/deploy-app.sh                              # build + deploy to dev
+#   APP_ENV=prod TAG=<tag already in ECR> bash scripts/aws/deploy-app.sh --no-build   # promote to prod
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 BUILD=true
@@ -29,11 +29,12 @@ if $BUILD; then
     --query 'imageScanFindings.findingSeverityCounts' --output table 2>/dev/null || echo "(scan still running)"
 fi
 
-step "Generate Helm values from Terraform outputs"
+step "Generate Helm values for ${APP_ENV} from Terraform outputs"
 GEN="$ROOT/helm/opsdesk/values-eks.generated.yaml"
 GEN_PLATFORM="$ROOT/helm/opsdesk/values-eks.platform.generated.yaml"
-tf infra output -raw helm_values > "$GEN"
-tf platform output -raw helm_values > "$GEN_PLATFORM"
+pick() { python3 -c 'import sys,json; print(json.load(sys.stdin)[sys.argv[1]])' "$APP_ENV"; }
+tf infra output -json helm_values | pick > "$GEN"
+tf platform output -json helm_values | pick > "$GEN_PLATFORM"
 
 # Alert annotations link to docs/runbook.md in this repository (GitHub Actions sets GITHUB_REPOSITORY;
 # in CloudShell it is derived from the git remote).
@@ -41,9 +42,9 @@ REPO_SLUG="${GITHUB_REPOSITORY:-$(git -C "$ROOT" remote get-url origin 2>/dev/nu
 RUNBOOK_URL=""
 [[ -n "$REPO_SLUG" ]] && RUNBOOK_URL="${GITHUB_SERVER_URL:-https://github.com}/${REPO_SLUG}/blob/main/docs/runbook.md"
 
-step "helm upgrade --install (atomic)"
+step "helm upgrade --install into ${APP_NS} (atomic)"
 helm upgrade --install opsdesk "$ROOT/helm/opsdesk" -n "$APP_NS" \
-  -f "$ROOT/helm/opsdesk/values-eks.yaml" -f "$GEN" -f "$GEN_PLATFORM" \
+  -f "$ROOT/helm/opsdesk/values-eks.yaml" -f "$ROOT/helm/opsdesk/values-${APP_ENV}.yaml" -f "$GEN" -f "$GEN_PLATFORM" \
   --set image.tag="$TAG" \
   --set-string monitoring.prometheusRule.runbookBaseUrl="$RUNBOOK_URL" \
   --atomic --wait --timeout 10m

@@ -7,50 +7,70 @@ is creating the OIDC trust and the deploy role once in the IAM console (GitHub c
 
 ```mermaid
 flowchart LR
-  user([Your browser<br/>allowed_cidrs only]) -->|HTTP :80| alb[ALB<br/>group: opsdesk]
-  subgraph vpc[VPC 10.40.0.0/16 · 2 AZs]
-    subgraph public[Public subnets]
-      alb
-      nat[NAT gateway x1]
+  user([Your browser<br/>allowed_cidrs only]) -->|HTTP :80| albp[ALB opsdesk-prod<br/>app + /grafana]
+  user --> albd[ALB opsdesk-dev]
+  subgraph vpc[VPC 10.40.0.0/16 · 2 AZs · one shared EKS cluster "opsdesk"]
+    subgraph prod[namespace opsdesk-prod · quota · NetworkPolicies]
+      apip[ticket-api x2-6] --- workp[ticket-worker]
     end
-    subgraph private[Private subnets · EKS managed node group]
-      api[ticket-api x2-6<br/>HPA] -->|OTLP| otel[OTel Collector] --> tempo[Tempo]
-      worker[ticket-worker]
-      prom[Prometheus + Alertmanager] --> graf[Grafana /grafana]
-      graf --> tempo
-      fb[Fluent Bit]
+    subgraph dev[namespace opsdesk-dev · quota · NetworkPolicies]
+      apid[ticket-api x1-3] --- workd[ticket-worker]
+    end
+    subgraph platform[shared platform namespaces]
+      prom[Prometheus + Alertmanager] --> graf[Grafana]
+      tempo[Tempo / OTel]
       eso[External Secrets]
+      fb[Fluent Bit]
     end
-    subgraph db[Database subnets]
-      rds[(RDS PostgreSQL 16<br/>KMS · force_ssl)]
-    end
+    rdsp[(RDS opsdesk-prod)]
+    rdsd[(RDS opsdesk-dev)]
   end
-  alb -->|/| api
-  alb -->|/grafana| graf
-  api -->|5432| rds
-  worker -->|5432| rds
-  api -->|SendMessage · IRSA| sqs[[SQS notifications<br/>KMS]]
-  sqs -->|Receive · IRSA| worker
-  sqs -. 3 failed receives .-> dlq[[DLQ]]
-  eso -->|GetSecretValue · IRSA| sm[(Secrets Manager<br/>app + RDS-managed DB secret)]
-  fb -->|IRSA| cw[(CloudWatch Logs<br/>7-day retention)]
-  ecr[(ECR · immutable tags<br/>scan on push)] -.image.-> api
-  cwa[CloudWatch alarms<br/>DLQ · queue age · RDS] --> sns[SNS → email]
-  prom -. alert webhook .-> api
+  albp --> apip
+  albp -->|/grafana| graf
+  albd --> apid
+  apip --> rdsp
+  apid --> rdsd
+  apip --> sqsp[[SQS opsdesk-prod + DLQ]] --> workp
+  apid --> sqsd[[SQS opsdesk-dev + DLQ]] --> workd
+  prom -. alerts namespace=opsdesk-prod .-> apip
+  prom -. alerts namespace=opsdesk-dev .-> apid
+  eso -->|role per namespace| sm[(Secrets Manager<br/>opsdesk-dev/app · opsdesk-prod/app)]
+  fb --> cw[(CloudWatch Logs<br/>/opsdesk-dev · /opsdesk-prod)]
 ```
+
+## Two environments, one cluster
+
+dev and prod share the **platform** (EKS cluster, VPC, KMS key, ECR, Prometheus/Grafana/Tempo) and nothing else:
+
+| Isolation layer | dev | prod | How |
+| --- | --- | --- | --- |
+| Namespace | `opsdesk-dev` | `opsdesk-prod` | Pod Security `restricted`; ResourceQuota (dev 2 vCPU / 3 GiB, prod 3 vCPU / 4 GiB) + LimitRange |
+| Network | | | NetworkPolicies: ingress only from the same namespace, the `observability` namespace and the ALB subnets; egress only DNS, 5432, 443, 4318 — no traffic between environments |
+| AWS identity | `opsdesk-dev-api/-worker/-secrets` | `opsdesk-prod-…` | IRSA roles trusted only for service accounts in their own namespace |
+| Data | own RDS + SQS/DLQ | own RDS + SQS/DLQ | separate instances and credentials |
+| Secrets | `opsdesk-dev/app` | `opsdesk-prod/app` | each SecretStore authenticates with its namespace's service account; the External Secrets controller has no AWS permissions |
+| Entry point | own ALB | own ALB (+ Grafana) | ingress groups `opsdesk-dev` / `opsdesk-prod` |
+| Logs and alarms | `/opsdesk-dev/application` | `/opsdesk-prod/application` | own log group, Logs Insights queries, CloudWatch alarms; costs tagged `Env=dev` / `Env=prod` |
+| Alerts → tickets | dev's OpsDesk | prod's OpsDesk | Alertmanager routes by namespace, each with its own bearer token |
+| Delivery | every push to `main` | same image, after approval | GitHub environments `dev` (no reviewer) and `prod` (required reviewer) |
+
+Known gap: both environments' pods share the node security group, so at the network level a dev pod could open a
+TCP connection to the prod database endpoint; it has no credentials for it (separate secret, separate IAM role).
+Closing it needs security groups for pods or a node group per environment ([findings](security/findings.md)).
+
 
 | Layer | Terraform root | What it creates |
 | --- | --- | --- |
-| Bootstrap (once) | `terraform/bootstrap` → `terraform/modules/github_oidc` | GitHub OIDC provider, deploy role `opsdesk-github-deploy` (trusts only this repo's `main`, PRs and the `demo` environment), S3 state bucket (versioned, encrypted, TLS-only, native S3 locking) |
-| Infrastructure | `terraform/infra` → `terraform/modules/*` (network, kms, eks, ecr, sqs, rds, secrets, irsa, observability, security) | VPC (1 NAT, flow logs), EKS + managed node group, ECR, RDS PostgreSQL, SQS + DLQ, KMS key, IRSA roles, Secrets Manager, CloudWatch log groups + alarms + SNS, AWS Budget; Day-4 toggles for GuardDuty, Security Hub, Inspector, CloudTrail |
-| Platform | `terraform/platform` | gp3 StorageClass, namespaces with Pod Security levels, AWS Load Balancer Controller, External Secrets Operator, metrics-server, Cluster Autoscaler, Fluent Bit → CloudWatch, kube-prometheus-stack (Grafana on the ALB at `/grafana`), Tempo, OpenTelemetry Collector, the OpsDesk dashboard |
-| App | Helm (`helm/opsdesk` + `values-eks.yaml`) | ticket-api, ticket-worker, Ingress (ALB), ExternalSecret, IRSA service accounts, NetworkPolicies, ServiceMonitors, HPA, PDB |
+| Bootstrap (once) | `terraform/bootstrap` → `terraform/modules/github_oidc` | S3 state bucket (versioned, encrypted, TLS-only, native S3 locking); optionally the GitHub OIDC provider + deploy role |
+| Infrastructure | `terraform/infra` → shared modules (network, kms, eks, ecr, observability, irsa, security) + `modules/environment` × dev, prod (sqs, rds, secrets, IAM, log group, alarms) | VPC (1 NAT, flow logs), EKS + managed node group, ECR, KMS key, SNS, AWS Budget, Day-4 security toggles; per environment: RDS, SQS + DLQ, secret, IRSA roles, log group, alarms |
+| Platform | `terraform/platform` | gp3 StorageClass, namespaces `opsdesk-dev` / `opsdesk-prod` with Pod Security, ResourceQuota and LimitRange, AWS Load Balancer Controller, External Secrets Operator, metrics-server, Cluster Autoscaler, Fluent Bit → CloudWatch (log group per namespace), kube-prometheus-stack (Alertmanager routes per environment, Grafana on prod's ALB at `/grafana`), Tempo, OpenTelemetry Collector, both dashboards |
+| App | Helm (`helm/opsdesk` + `values-eks.yaml` + `values-dev.yaml` / `values-prod.yaml`) | one release per namespace: ticket-api, ticket-worker, Ingress (ALB), ExternalSecret + SecretStore, IRSA service accounts, NetworkPolicies, ServiceMonitors, PrometheusRule, HPA, PDB |
 
 ## Cost while it runs (approximate, us-east-1 on-demand)
 
-About **$12–14 per day**: EKS control plane ~$2.40, 3× m5.large ~$6.90, NAT ~$1.10 + data,
-ALB ~$0.60, RDS db.t4g.micro ~$0.40, EBS volumes ~$0.40, public IPv4 addresses ~$0.40, small amounts for KMS,
-Secrets Manager and CloudWatch. **Run the Destroy workflow whenever you stop working**; Infrastructure + Release
+About **$13–15 per day** for both environments: EKS control plane ~$2.40, 3× m5.large ~$6.90, NAT ~$1.10 + data,
+2 ALBs ~$1.20, 2 RDS db.t4g.micro ~$0.80, EBS volumes ~$0.40, public IPv4 addresses ~$0.60, small amounts for KMS,
+Secrets Manager and CloudWatch. The second environment adds only ~$1.50/day because the cluster is shared. **Run the Destroy workflow whenever you stop working**; Infrastructure + Release
 rebuild everything in about 40 minutes. Breakdown and savings recommendations: [cost.md](cost.md).
 
 ## One-time setup
@@ -72,7 +92,7 @@ in the IAM console (region **us-east-1**); everything after that is Terraform ru
 
 - **Trust relationships** → *Edit trust policy* → replace everything with the policy below (put your 12-digit account
   ID, top right of the console, in place of `ACCOUNT_ID`) → *Update policy*. It also allows pull requests and the
-  protected `demo` environment, which the workflows use.
+  `dev` and `prod` GitHub environments, which the workflows use.
 - **Summary** → *Edit* → **Maximum session duration: 2 hours** → *Save* (creating EKS takes longer than 1 hour).
 - Copy the role **ARN** (`arn:aws:iam::ACCOUNT_ID:role/opsdesk-github-deploy`).
 
@@ -90,7 +110,8 @@ in the IAM console (region **us-east-1**); everything after that is Terraform ru
           "token.actions.githubusercontent.com:sub": [
             "repo:ngems1/observability-sre:ref:refs/heads/main",
             "repo:ngems1/observability-sre:pull_request",
-            "repo:ngems1/observability-sre:environment:demo"
+            "repo:ngems1/observability-sre:environment:dev",
+            "repo:ngems1/observability-sre:environment:prod"
           ]
         }
       }
@@ -108,8 +129,9 @@ available, `terraform -chdir=terraform/bootstrap apply` creates the whole bootst
 
 **3. GitHub → repository Settings**
 
-- *Environments* → **New environment** `demo` → *Required reviewers*: add yourself (every apply, deploy, drill and
-  destroy then waits for your approval: the protected-environment requirement of the plan).
+- *Environments* → **New environment** `dev` (no protection rules: every push to `main` deploys there), then
+  **New environment** `prod` → *Required reviewers*: add yourself. Promotion to prod, prod drills, Infrastructure
+  apply, Bootstrap and Destroy then wait for your approval (they change prod or the shared platform).
 - *Secrets and variables → Actions → Variables* → add:
 
 | Variable | Example | Purpose |
@@ -134,14 +156,15 @@ and confirm the SNS subscription email AWS sends to `ALERT_EMAIL`.
 | --- | --- | --- |
 | 0 | **Bootstrap** → Run workflow → approve (first time only) | ~1 min (state bucket) |
 | 1 | **Infrastructure** → Run workflow → `apply` → approve | ~30 min (EKS ~15, RDS ~8, platform ~10) |
-| 2 | **Release** → Run workflow → approve the deploy | ~8 min (CI, build, Trivy gate, ECR push, Helm, smoke test) |
-| 3 | **Ops** → `load-start` | 1 min (k6 at 5 req/s) |
+| 2 | **Release** → Run workflow → dev deploys by itself → approve **Promote to prod** | ~8 min dev + ~5 min prod (same image) |
+| 3 | **Ops** → environment `dev` → `load-start`, then `prod` → `load-start` | 1 min each (k6 at 5 req/s inside each namespace) |
 
-The Release run summary shows the **Web UI** and **Grafana** URLs (`http://<alb>/` and `/grafana`).
-Logins live in **AWS console → Secrets Manager**: `opsdesk-demo/app` (`bootstrap_users` = `name:role:api_key`
-entries; paste a key on the sign-in page) and `opsdesk-demo/grafana`.
+The Release summary shows each environment's **Web UI** URL; Grafana is on prod's (`http://<prod-alb>/grafana`).
+Logins live in **AWS console → Secrets Manager**: `opsdesk-dev/app` and `opsdesk-prod/app` (`bootstrap_users` =
+`name:role:api_key` entries; paste a key on the sign-in page) and `opsdesk/grafana`.
 
-After that, every push to `main` runs CI → build → scan → (approval) → deploy → smoke test → rollback if it fails.
+After that, every push to `main` runs CI → build → Trivy gate → **dev** (deploy, smoke test, automatic rollback) →
+**approval** → **prod** (the same image, smoke test, automatic rollback).
 
 ## Workflows
 
@@ -149,13 +172,17 @@ After that, every push to `main` runs CI → build → scan → (approval) → d
 | --- | --- | --- |
 | **CI** | pull requests; called by Release | pytest + ruff, Docker build, Trivy (deps + image, SARIF to the Security tab), terraform validate, Checkov (Terraform, rendered Helm), helm lint, kubeconform |
 | **Bootstrap** | manual, once | Terraform `bootstrap`: the state bucket (state of the bootstrap root kept in the bucket) |
-| **Infrastructure** | PR / push: plan · manual: apply | Terraform `infra` + `platform` (apply needs `demo` approval) |
-| **Release** | push to `main`, manual | CI → image tagged with the commit SHA → Trivy gate → ECR → Helm `--atomic` → smoke test → automatic `helm rollback` on failure. Skips deploy when the environment is down |
-| **Ops** | manual | `status`, `load-start/stop`, drills 1–4, `errors-on/off`, `rollback` — each run logs timestamps and before/after state as drill evidence |
-| **Destroy** | manual (type `destroy`) | app → platform → infra, in the order that lets the ALB and VPC delete cleanly |
+| **Infrastructure** | PR / push: plan · manual: apply | Terraform `infra` + `platform` (apply needs `prod` approval: it changes the shared platform) |
+| **Release** | push to `main`, manual | CI → image tagged with the commit SHA → Trivy gate → ECR → **dev** (Helm `--atomic`, smoke test, rollback on failure) → approval → **prod** with the same image. Skips deploy when the environment is down |
+| **Ops** | manual, input `environment` (default `dev`) | `status`, `load-start/stop`, drills 1–7, `errors-on/off`, `rollback` in one environment; prod needs approval. Each run logs timestamps and before/after state as drill evidence |
+| **Destroy** | manual (type `destroy`) | both apps → platform → infra, in the order that lets the ALBs and VPC delete cleanly |
 | **Terraform fmt** | manual | formats Terraform and commits the change |
 
-## Failure drills (Actions → Ops)
+## Failure drills (Actions → Ops → environment `dev`)
+
+Run drills in **dev**: everything they break is dev's own (namespace, database, queue, network rules). Keep
+Grafana → *Where is the fault?* open and switch the **Environment** dropdown between `opsdesk-dev` (red tile) and
+`opsdesk-prod` (all green): that is the isolation evidence.
 
 | Drill | Inject | Recover | Evidence to capture |
 | --- | --- | --- | --- |
@@ -164,7 +191,8 @@ After that, every push to `main` runs CI → build → scan → (approval) → d
 | 3 Stuck queue | `drill3-stuck-queue-on` · `drill3-poison-message` | `drill3-stuck-queue-off` | **OpsDesk incident ticket opened by `OpsDeskWorkerDown`** (~3 min) with its time to recover, queue-age alarm email, DLQ alarm, delivery-time panel |
 | 4 DB connections | `drill4-pool-exhaustion-on` + `load-start` | `drill4-pool-exhaustion-off` | DB pool panel, RDS connections metric, `OpsDeskDatabaseErrors` ticket (`too_many_connections`, layer database) |
 | 6 Network | `drill6-network-block-db-on` (egress NetworkPolicy drops port 5432; open DB sessions are ended) | `drill6-network-block-db-off` | `OpsDeskDependencyUnreachable` ticket with `kind=connect_timeout`, **layer network** while RDS stays healthy; Network tile red on *Where is the fault?* |
-| 5 Bad deploy | push a commit that breaks `/readyz` | Release rolls back automatically | Release run log, `helm history` |
+| 5 Bad deploy | push a commit that breaks `/readyz` | Release rolls back dev automatically and never promotes to prod | Release run log (prod job not reached), `helm history` |
+| 7 Noisy neighbour | `drill7-noisy-neighbour-on` (30 pods × 200m CPU in dev) | `drill7-noisy-neighbour-off` | `exceeded quota` events and the quota usage in the run log; prod pods and latency unchanged |
 
 Every drill that fires an alert leaves an **ALERT** ticket in OpsDesk with the suspected layer and the time to
 recover: that ticket is the incident record (assign, triage, add evidence, postmortem). For each drill, screenshot
@@ -179,13 +207,14 @@ On-call steps per alert: [runbook.md](runbook.md).
 | 2 Missing index | Database (slow) |
 | 4 Connection limit | Database (rejects work) |
 | 6 NetworkPolicy blocks 5432 | Network |
+| 7 Noisy neighbour | Kubernetes (quota keeps environments apart) |
 
 ## Troubleshooting
 
 - **Release says "Deploy skipped"** — the environment is down: run Infrastructure (`apply`) first.
 - **`Not authorized to perform sts:AssumeRoleWithWebIdentity`** — the trust policy of `opsdesk-github-deploy` must name
-  the repository exactly (`repo:ngems1/observability-sre:...`, case-sensitive) and include the `environment:demo` line;
-  the account ID in the `Federated` ARN must be yours.
+  the repository exactly (`repo:ngems1/observability-sre:...`, case-sensitive) and include the `environment:dev` and
+  `environment:prod` lines; the account ID in the `Federated` ARN must be yours.
 - **`The requested DurationSeconds exceeds the MaxSessionDuration`** — set the role's maximum session duration to 2 hours.
 - **Bootstrap fails with `EntityAlreadyExists` on the OIDC provider** — the account already has one: re-run the
   apply with `-var create_oidc_provider=false`.
@@ -197,8 +226,13 @@ On-call steps per alert: [runbook.md](runbook.md).
 - **Pods `CreateContainerConfigError`** — the ExternalSecret has not synced: Ops → `status` shows the ExternalSecret state.
 - **No ticket after an alert fires** — Grafana → Alerting → Alert rules shows whether it is firing; Alertmanager logs
   (`kubectl -n observability logs alertmanager-kube-prometheus-stack-alertmanager-0`) show webhook errors: 401 means
-  the token in Secrets Manager (`opsdesk-demo/app` → `alert_webhook_token`) and the `alertmanager-opsdesk-webhook`
-  Secret differ — re-run Infrastructure (`apply`).
+  the token in Secrets Manager (`opsdesk-<env>/app` → `alert_webhook_token`) and the `alertmanager-opsdesk-webhook`
+  Secret (key `token-<env>`) differ — re-run Infrastructure (`apply`).
+- **API pods never ready right after the first deploy (readiness probe timeouts)** — the NetworkPolicy may be blocking
+  the kubelet probes on your VPC CNI version: re-run Release with `networkPolicy.extraIngressCidrs` set to the private
+  subnets (`10.40.16.0/20`, `10.40.32.0/20`) in `values-eks.yaml` (weakens isolation; note it in the findings).
+- **`exceeded quota` outside a drill** — the namespace quota is too small for the HPA maximum: raise
+  `namespace_quotas` in `terraform/platform/variables.tf`.
 - **Destroy hangs on the VPC** — an ALB or ENI is left over: delete it in EC2 → Load Balancers, then re-run Destroy.
 
 ## Fallback: AWS CloudShell

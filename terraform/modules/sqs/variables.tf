@@ -13,3 +13,9 @@ variable "max_receive_count" {
   type        = number
   default     = 3
 }
+
+variable "tags" {
+  description = "Extra tags (e.g. Env = dev) on top of the provider default tags."
+  type        = map(string)
+  default     = {}
+}

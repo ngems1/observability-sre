@@ -1,8 +1,16 @@
 # OpsDesk AWS infrastructure: one module per component (terraform/modules/<component>).
-# Read top to bottom in dependency order:
-#   kms -> network -> eks -> ecr / sqs / secrets -> rds -> observability -> irsa -> security
-# The in-cluster platform (load balancer controller, monitoring, External Secrets) is a separate root:
-# terraform/platform, which reads this root's outputs from remote state.
+#
+#   shared platform (one each)          per environment (dev, prod) -> modules/environment
+#   ------------------------------      ---------------------------------------------------
+#   kms        encryption key           sqs      queue + DLQ
+#   network    VPC, subnets, NAT        rds      PostgreSQL instance, own credentials
+#   eks        cluster + node group     secrets  app secret (API keys, webhook token)
+#   ecr        image repository         IAM      roles for its pods, trusted only in its namespace
+#   observability  SNS + budget         ops      log group, Logs Insights queries, CloudWatch alarms
+#   irsa       controller roles
+#   security   GuardDuty & co.
+#
+# The in-cluster platform (namespaces, quotas, controllers, monitoring) is the separate root terraform/platform.
 
 module "kms" {
   source = "../modules/kms"
@@ -47,65 +55,49 @@ module "ecr" {
   kms_key_arn     = module.kms.key_arn
 }
 
-module "sqs" {
-  source = "../modules/sqs"
-
-  name_prefix = var.project
-  kms_key_arn = module.kms.key_arn
-}
-
-module "secrets" {
-  source = "../modules/secrets"
-
-  name              = local.name
-  kms_key_arn       = module.kms.key_arn
-  slack_webhook_url = var.slack_webhook_url
-}
-
-module "rds" {
-  source = "../modules/rds"
-
-  name                      = local.name
-  vpc_id                    = module.network.vpc_id
-  db_subnet_group_name      = module.network.database_subnet_group_name
-  allowed_security_group_id = module.eks.node_security_group_id
-  kms_key_arn               = module.kms.key_arn
-  instance_class            = var.db_instance_class
-  allocated_storage_gb      = var.db_allocated_storage_gb
-  multi_az                  = var.db_multi_az
-  performance_insights      = var.db_performance_insights
-  log_retention_days        = var.log_retention_days
-}
-
 module "observability" {
   source = "../modules/observability"
 
   name               = local.name
   project            = var.project
-  environment        = var.environment
   kms_key_arn        = module.kms.key_arn
-  log_retention_days = var.log_retention_days
   alert_email        = var.alert_email
   monthly_budget_usd = var.monthly_budget_usd
-  queue_name         = module.sqs.queue_name
-  dlq_name           = module.sqs.dlq_name
-  db_identifier      = module.rds.identifier
+}
+
+module "env" {
+  source   = "../modules/environment"
+  for_each = local.environments
+
+  environment = each.key
+  name        = each.value
+  namespace   = each.value
+  app_release = var.app_release
+
+  kms_key_arn            = module.kms.key_arn
+  vpc_id                 = module.network.vpc_id
+  db_subnet_group_name   = module.network.database_subnet_group_name
+  node_security_group_id = module.eks.node_security_group_id
+  oidc_provider_arn      = module.eks.oidc_provider_arn
+  oidc_issuer_url        = module.eks.cluster_oidc_issuer_url
+  sns_topic_arn          = module.observability.sns_topic_arn
+
+  db_instance_class       = var.db_instance_class
+  db_allocated_storage_gb = var.db_allocated_storage_gb
+  db_multi_az             = var.db_multi_az
+  db_performance_insights = var.db_performance_insights
+  log_retention_days      = var.log_retention_days
+  slack_webhook_url       = var.slack_webhook_url
 }
 
 module "irsa" {
   source = "../modules/irsa"
 
-  name                 = local.name
-  cluster_name         = module.eks.cluster_name
-  oidc_provider_arn    = module.eks.oidc_provider_arn
-  oidc_issuer_url      = module.eks.cluster_oidc_issuer_url
-  app_namespace        = var.app_namespace
-  app_release          = var.app_release
-  queue_arn            = module.sqs.queue_arn
-  dlq_arn              = module.sqs.dlq_arn
-  kms_key_arn          = module.kms.key_arn
-  readable_secret_arns = [module.secrets.secret_arn, module.rds.master_user_secret_arn]
-  app_log_group_arn    = module.observability.app_log_group_arn
+  name               = local.name
+  cluster_name       = module.eks.cluster_name
+  oidc_provider_arn  = module.eks.oidc_provider_arn
+  oidc_issuer_url    = module.eks.cluster_oidc_issuer_url
+  app_log_group_arns = [for e in module.env : e.log_group_arn]
 }
 
 module "security" {

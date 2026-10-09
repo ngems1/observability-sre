@@ -27,6 +27,7 @@ resource "aws_secretsmanager_secret" "app" {
   description             = "OpsDesk app secrets (bootstrap API keys, Slack webhook, Alertmanager webhook token)"
   kms_key_id              = var.kms_key_arn
   recovery_window_in_days = 0 # demo: allow immediate re-create after destroy
+  tags                    = var.tags
 }
 
 resource "aws_secretsmanager_secret_version" "app" {

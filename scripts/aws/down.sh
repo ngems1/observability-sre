@@ -14,8 +14,11 @@ ok="${CONFIRM:-}"
 
 if aws eks describe-cluster --name "$CLUSTER_NAME" >/dev/null 2>&1; then
   kubeconfig
-  step "Uninstall the app (removes its Ingress)"
-  helm uninstall opsdesk -n "$APP_NS" --wait 2>/dev/null || true
+  step "Uninstall the app in every environment (removes their Ingresses)"
+  for ns in opsdesk-dev opsdesk-prod; do
+    kubectl -n "$ns" delete deploy k6-load --ignore-not-found 2>/dev/null || true
+    helm uninstall opsdesk -n "$ns" --wait 2>/dev/null || true
+  done
   kubectl delete ingress --all -A --wait=true --timeout=5m 2>/dev/null || true
 
   step "Wait for the ALB to disappear"

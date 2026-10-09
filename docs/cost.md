@@ -1,13 +1,14 @@
 # OpsDesk cost analysis
 
-**Bottom line:** the demo environment costs about **$12 a day** while it runs, and **compute nodes are 57 % of
-that**. Three changes cut the monthly bill from about **$370** (left on 24/7) to about **$55** for the same hours of
-real use: run it only while working, put the nodes on Spot, and drop to two nodes once the CPU data shows the third
-is idle.
+**Bottom line:** the platform (one shared EKS cluster running **dev and prod**) costs about **$13.60 a day** while it
+runs, and **compute nodes are about half of that**. The second environment adds only about **$1.30 a day** (its own
+RDS, ALB and SQS) because it shares the cluster, nodes and NAT gateway. Three changes cut the monthly bill from about
+**$410** (left on 24/7) to about **$65** for the same hours of real use: run it only while working, put the nodes on
+Spot, and drop to two nodes once the CPU data shows the third is idle.
 
 Prices: AWS us-east-1 on-demand, checked October 2026 (sources at the end). Replace the "measured" column with your
 own Cost Explorer numbers after the first full day (Billing → Cost Explorer → *Group by* tag `Project` = `opsdesk`,
-daily granularity).
+daily granularity; then *Group by* tag `Env` to split `dev`, `prod` and `shared`).
 
 ## Where the money goes (baseline, per day)
 
@@ -16,15 +17,21 @@ daily granularity).
 | EC2 nodes (EKS managed node group) | $0.096 / h per m5.large | 3 × m5.large, on-demand | $6.91 | |
 | EKS control plane | $0.10 / h (standard support) | 1 cluster | $2.40 | |
 | NAT gateway | $0.045 / h + $0.045 / GB | 1 gateway, < 1 GB/day | $1.10 | |
-| Application Load Balancer | ~$0.0225 / h + LCUs | 1 ALB (app + Grafana) | ~$0.60 | |
-| Public IPv4 addresses | $0.005 / h each | NAT + ALB (2 AZs) = 3 | $0.36 | |
-| RDS PostgreSQL | ~$0.016 / h | db.t4g.micro, single-AZ, 20 GB gp3 | ~$0.45 | |
+| Application Load Balancers | ~$0.0225 / h + LCUs | 2 ALBs: dev, prod (+ Grafana) | ~$1.20 | |
+| Public IPv4 addresses | $0.005 / h each | NAT + 2 ALBs × 2 AZs = 5 | $0.60 | |
+| RDS PostgreSQL | ~$0.016 / h each | 2 × db.t4g.micro (dev, prod), single-AZ, 20 GB gp3 | ~$0.90 | |
 | EBS volumes | $0.08 / GB-month (gp3) | node disks + Prometheus 20 GiB + Tempo 10 GiB | ~$0.25 | |
-| KMS, Secrets Manager, CloudWatch Logs, SQS | small | 1 key, 2 secrets, 7-day logs, < 1M requests | ~$0.20 | |
-| **Total** | | | **≈ $12.30** | |
+| KMS, Secrets Manager, CloudWatch Logs, SQS | small | 1 key, 5 secrets, 2 queues + DLQs, 7-day logs | ~$0.25 | |
+| **Total** | | | **≈ $13.60** | |
 
 The EKS control plane, NAT gateway and public IPs are fixed costs: they are charged the same at zero traffic. That is
-why switching the environment off matters more than any tuning.
+why switching the platform off matters more than any tuning.
+
+**Cost of the second environment.** Dev and prod share the control plane, nodes, NAT gateway and observability stack;
+each adds only its own RDS instance (~$0.45), ALB with two public IPs (~$0.80) and small SQS / Secrets Manager / logs
+charges: about **$1.30 a day**. A separate cluster per environment would add $2.40 (control plane) + nodes + NAT, about
+**$10 a day**. That is the main cost reason to isolate environments with namespaces, quotas and NetworkPolicies inside
+one cluster.
 
 ## Recommendations
 
@@ -35,12 +42,13 @@ The environment is fully rebuilt from code: **Infrastructure → apply** and **R
 
 | Usage pattern | Hours / month | Cost / month |
 | --- | --- | --- |
-| Left on 24/7 | 720 | ≈ $370 |
-| 8 h a day, 5 days a week | ~175 | ≈ $90 |
+| Left on 24/7 | 720 | ≈ $410 |
+| 8 h a day, 5 days a week | ~175 | ≈ $100 |
 
 **Evidence to capture:** Cost Explorer daily bars (gaps on the days it was destroyed), the Destroy workflow runs,
-and the AWS Budget (`opsdesk-demo-monthly`, $150) never reaching its alert threshold.
-**Trade-off:** 40 minutes to come back; no data survives (fine for a demo, not for production).
+and the AWS Budget (`opsdesk-monthly`, $150) never reaching its alert threshold.
+**Trade-off:** 40 minutes to come back; no data survives (fine for a project platform, not for a real production
+environment).
 
 ### 2. Spot capacity for the worker nodes (−57 % on the biggest line)
 
@@ -49,7 +57,7 @@ m5.large on Spot was about **$0.0415 / h** versus **$0.096 / h** on-demand (−5
 `NODE_INSTANCE_TYPES` = `["m5.large","m5a.large","m6i.large"]` (several types = fewer interruptions), then run
 Infrastructure → apply.
 
-**Why it is safe here:** ticket-api runs 2+ replicas with a PodDisruptionBudget, the worker is stateless and SQS keeps
+**Why it is safe here:** ticket-api in prod runs 2+ replicas with a PodDisruptionBudget, the worker is stateless and SQS keeps
 messages while a node is replaced, and RDS holds all data outside the cluster.
 **Trade-off:** Spot interruption rates for m5.large run above 20 % at times. Prometheus loses up to a few minutes of
 data when its node is reclaimed. In production, keep stateful or critical add-ons on a small on-demand node group.
@@ -69,9 +77,13 @@ staying `Running` during a load test.
 
 - **Keep the NAT gateway, skip interface endpoints at this scale.** Six interface endpoints (ECR ×2, SQS, Secrets
   Manager, Logs, STS) in 2 AZs cost 12 × $0.01 / h = **$2.88 / day** whatever the traffic. They save
-  $0.035 per GB against NAT processing, so they pay off only above about **80 GB a day**; the demo moves under 1 GB.
+  $0.035 per GB against NAT processing, so they pay off only above about **80 GB a day**; the platform moves under 1 GB.
   The free S3 gateway endpoint is on (ECR image layers come from S3). Flip `enable_interface_endpoints` in
   production, where image pulls and log traffic are much larger.
+- **One ALB per environment, not one shared ALB.** Sharing one ALB (host-based rules) would save about $0.80 a day,
+  but a listener-rule mistake in dev could then break prod. Separate ALB groups keep the blast radius per environment.
+- **Dev is smaller than prod**: 1 API replica (HPA 1–3, no PodDisruptionBudget) against 2–6 in prod, and a smaller
+  ResourceQuota (2 CPU against 3), so dev cannot take the node capacity prod needs.
 - **7-day log retention** on every CloudWatch log group (app logs, VPC flow logs, EKS control plane, RDS) keeps log
   storage near zero; long-term retention belongs in S3 with lifecycle rules.
 - **Graviton next:** m7g.large is $0.0816 / h (−15 % against m5.large, with better performance per vCPU). It needs
@@ -81,13 +93,13 @@ staying `Running` during a load test.
 
 | Scenario | Nodes | Hours / month | Cost / month |
 | --- | --- | --- | --- |
-| Baseline, left on | 3 × m5.large on-demand | 720 | ≈ $370 |
-| 1. Work hours only | 3 × on-demand | 175 | ≈ $90 |
-| 1 + 2. Spot | 3 × Spot | 175 | ≈ $60 |
-| 1 + 2 + 3. Two nodes | 2 × Spot | 175 | ≈ $55 |
+| Baseline, left on | 3 × m5.large on-demand | 720 | ≈ $410 |
+| 1. Work hours only | 3 × on-demand | 175 | ≈ $100 |
+| 1 + 2. Spot | 3 × Spot | 175 | ≈ $70 |
+| 1 + 2 + 3. Two nodes | 2 × Spot | 175 | ≈ $65 |
 
 Cost controls already in the code: tags `Project`, `Env`, `Owner` on every resource (Terraform `default_tags`), an
-AWS Budget with email alerts, single NAT gateway, single-AZ `db.t4g.micro`, no interface endpoints by default, and
+AWS Budget with email alerts, single NAT gateway, single-AZ `db.t4g.micro` per environment, both environments on one cluster, no interface endpoints by default, and
 EKS on a version in standard support (extended support costs $0.60 / h per cluster, six times more).
 
 ## Sources

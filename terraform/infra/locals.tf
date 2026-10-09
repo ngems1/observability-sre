@@ -8,14 +8,18 @@ data "aws_availability_zones" "available" {
 }
 
 locals {
-  name = "${var.project}-${var.environment}"
+  # Shared platform resources are named <project> (cluster "opsdesk"); each environment's are <project>-<env>
+  name = var.project
   azs  = slice(data.aws_availability_zones.available.names, 0, 2)
+
+  # dev -> namespace opsdesk-dev, resources opsdesk-dev-*; prod -> opsdesk-prod
+  environments = { for e in var.environments : e => "${var.project}-${e}" }
 
   # Cost allocation tags on every resource (provider default_tags): activate Project/Env/Owner in
   # Billing -> Cost allocation tags so Cost Explorer and the budget can filter on them.
   tags = {
     Project   = var.project
-    Env       = var.environment
+    Env       = "shared" # per-environment resources override this with Env = dev / prod
     Owner     = var.owner
     ManagedBy = "terraform"
   }

@@ -53,3 +53,9 @@ variable "log_retention_days" {
   description = "Retention of the postgresql log group."
   type        = number
 }
+
+variable "tags" {
+  description = "Extra tags (e.g. Env = dev) on top of the provider default tags."
+  type        = map(string)
+  default     = {}
+}

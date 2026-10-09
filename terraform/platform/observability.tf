@@ -8,10 +8,10 @@ resource "random_password" "grafana_admin" {
   special = false
 }
 
-# Readable in the AWS console (Secrets Manager -> opsdesk-demo/grafana) - no CLI needed
+# Readable in the AWS console (Secrets Manager -> opsdesk/grafana) - no CLI needed
 resource "aws_secretsmanager_secret" "grafana" {
   #checkov:skip=CKV2_AWS_57:Rotate with terraform apply -replace=random_password.grafana_admin
-  name                    = "opsdesk-demo/grafana"
+  name                    = "opsdesk/grafana"
   description             = "Grafana admin login for the OpsDesk demo"
   kms_key_id              = local.infra.kms_key_arn
   recovery_window_in_days = 0
@@ -26,7 +26,6 @@ locals {
   alb_common_annotations = {
     "alb.ingress.kubernetes.io/scheme"        = "internet-facing"
     "alb.ingress.kubernetes.io/target-type"   = "ip"
-    "alb.ingress.kubernetes.io/group.name"    = "opsdesk"
     "alb.ingress.kubernetes.io/inbound-cidrs" = join(",", var.allowed_cidrs)
     "alb.ingress.kubernetes.io/listen-ports"  = "[{\"HTTP\": 80}]"
   }
@@ -119,18 +118,47 @@ resource "helm_release" "otel_collector" {
   depends_on = [helm_release.tempo]
 }
 
-# Alertmanager -> OpsDesk incident tickets. The bearer token is the one the API reads from Secrets Manager
-# (infra root); Alertmanager reads it from this Secret, mounted at /etc/alertmanager/secrets/<name>/token.
+# Alertmanager -> OpsDesk incident tickets, per environment: alerts from namespace opsdesk-dev open tickets in
+# dev's OpsDesk, opsdesk-prod in prod's. Platform-wide critical alerts (no app namespace) go to prod's OpsDesk.
+# Each environment's bearer token comes from its Secrets Manager secret (infra root); Alertmanager reads them
+# from this Secret, mounted at /etc/alertmanager/secrets/alertmanager-opsdesk-webhook/token-<env>.
 resource "kubernetes_secret_v1" "alertmanager_opsdesk" {
   metadata {
     name      = "alertmanager-opsdesk-webhook"
     namespace = kubernetes_namespace_v1.observability.metadata[0].name
   }
-  data = { token = local.infra.alert_webhook_token }
+  data = { for env, token in local.infra.alert_webhook_tokens : "token-${env}" => token }
 }
 
 locals {
-  # Critical alerts, and warnings that name an owning team, open an incident follow-up ticket in OpsDesk.
+  am_secret_dir = "/etc/alertmanager/secrets/alertmanager-opsdesk-webhook"
+
+  # Per environment: critical alerts, and warnings that name an owning team, open a ticket
+  am_env_routes = flatten([
+    for env, e in local.environments : [
+      { receiver = "opsdesk-${env}", matchers = ["namespace=\"${e.namespace}\"", "severity=\"critical\""] },
+      { receiver = "opsdesk-${env}", matchers = ["namespace=\"${e.namespace}\"", "severity=\"warning\"", "team=~\".+\""] },
+      { receiver = "null", matchers = ["namespace=\"${e.namespace}\""] },
+    ]
+  ])
+
+  am_env_receivers = [
+    for env, e in local.environments : {
+      name = "opsdesk-${env}"
+      webhook_configs = [{
+        url           = "http://opsdesk-api.${e.namespace}.svc.cluster.local:80/integrations/alertmanager"
+        send_resolved = true
+        max_alerts    = 50
+        http_config = {
+          authorization = {
+            type             = "Bearer"
+            credentials_file = "${local.am_secret_dir}/token-${env}"
+          }
+        }
+      }]
+    }
+  ]
+
   alertmanager_config = {
     global = { resolve_timeout = "5m" }
     route = {
@@ -139,11 +167,12 @@ locals {
       group_wait      = "30s"
       group_interval  = "5m"
       repeat_interval = "4h"
-      routes = [
-        { receiver = "null", matchers = ["alertname=~\"Watchdog|InfoInhibitor\""] },
-        { receiver = "opsdesk", matchers = ["severity=\"critical\""] },
-        { receiver = "opsdesk", matchers = ["severity=\"warning\"", "team=~\".+\""] },
-      ]
+      routes = concat(
+        [{ receiver = "null", matchers = ["alertname=~\"Watchdog|InfoInhibitor\""] }],
+        local.am_env_routes,
+        # platform-wide critical alerts (nodes, CoreDNS, monitoring) are tracked in prod's OpsDesk
+        [{ receiver = "opsdesk-prod", matchers = ["severity=\"critical\""] }],
+      )
     }
     inhibit_rules = [
       {
@@ -168,23 +197,7 @@ locals {
         equal           = ["namespace"]
       },
     ]
-    receivers = [
-      { name = "null" },
-      {
-        name = "opsdesk"
-        webhook_configs = [{
-          url           = "http://opsdesk-api.${var.app_namespace}.svc.cluster.local:80/integrations/alertmanager"
-          send_resolved = true
-          max_alerts    = 50
-          http_config = {
-            authorization = {
-              type             = "Bearer"
-              credentials_file = "/etc/alertmanager/secrets/${kubernetes_secret_v1.alertmanager_opsdesk.metadata[0].name}/token"
-            }
-          }
-        }]
-      },
-    ]
+    receivers = concat([{ name = "null" }], local.am_env_receivers)
   }
 }
 
@@ -239,7 +252,9 @@ resource "helm_release" "kube_prometheus_stack" {
         path             = "/grafana"
         pathType         = "Prefix"
         hosts            = []
+        # Grafana is a platform tool: it shares prod's load balancer (dev gets its own, app only)
         annotations = merge(local.alb_common_annotations, {
+          "alb.ingress.kubernetes.io/group.name"       = "opsdesk-prod"
           "alb.ingress.kubernetes.io/group.order"      = "10"
           "alb.ingress.kubernetes.io/healthcheck-path" = "/grafana/api/health"
         })

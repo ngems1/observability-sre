@@ -47,3 +47,4 @@ monitoring:
 
 networkPolicy:
   enabled: true                  # rendered and applied; Docker Desktop's CNI does not enforce it
+  loadBalancerCidrs: ["0.0.0.0/0"]   # single local environment: the Docker Desktop load balancer may come from anywhere

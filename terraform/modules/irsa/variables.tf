@@ -1,5 +1,5 @@
 variable "name" {
-  description = "Name prefix for the roles (project-environment)."
+  description = "Name prefix for the roles."
   type        = string
 }
 
@@ -18,37 +18,7 @@ variable "oidc_issuer_url" {
   type        = string
 }
 
-variable "app_namespace" {
-  description = "Namespace of the OpsDesk Helm release."
-  type        = string
-}
-
-variable "app_release" {
-  description = "Helm release name; service accounts are <release>-api and <release>-worker."
-  type        = string
-}
-
-variable "queue_arn" {
-  description = "Notification queue the API publishes to and the worker consumes."
-  type        = string
-}
-
-variable "dlq_arn" {
-  description = "Dead-letter queue (the API reads its depth only)."
-  type        = string
-}
-
-variable "kms_key_arn" {
-  description = "Application CMK (SQS messages and secrets are encrypted with it)."
-  type        = string
-}
-
-variable "readable_secret_arns" {
-  description = "Secrets External Secrets Operator may read (app secret + RDS-managed DB secret)."
+variable "app_log_group_arns" {
+  description = "Log groups Fluent Bit may write to (one per environment)."
   type        = list(string)
-}
-
-variable "app_log_group_arn" {
-  description = "CloudWatch log group Fluent Bit writes the app logs to."
-  type        = string
 }

@@ -32,11 +32,12 @@ resource "helm_release" "external_secrets" {
   wait             = true
   timeout          = 600
 
+  # No AWS role on the controller itself: each environment's SecretStore authenticates with a service account
+  # in its own namespace (IRSA role trusted only there), so dev can never read prod's secrets.
   values = [yamlencode({
     installCRDs = true
     serviceAccount = {
-      name        = "external-secrets"
-      annotations = { "eks.amazonaws.com/role-arn" = local.roles.external_secrets }
+      name = "external-secrets"
     }
     # region for the AWS SDK inside the controller (no IMDS access from pods)
     extraEnv = [{ name = "AWS_REGION", value = var.region }]
@@ -86,7 +87,8 @@ resource "helm_release" "cluster_autoscaler" {
   depends_on = [helm_release.aws_lb_controller]
 }
 
-# Ships ONLY the opsdesk namespace's container logs to CloudWatch (cost action: less ingestion)
+# Ships ONLY the application namespaces' container logs to CloudWatch (cost: less ingestion),
+# each environment to its own log group: /opsdesk-dev/application, /opsdesk-prod/application
 resource "helm_release" "fluent_bit" {
   name       = "aws-for-fluent-bit"
   repository = "https://aws.github.io/eks-charts"
@@ -101,7 +103,7 @@ resource "helm_release" "fluent_bit" {
       annotations = { "eks.amazonaws.com/role-arn" = local.roles.fluent_bit }
     }
     input = {
-      path = "/var/log/containers/*_${var.app_namespace}_*.log"
+      path = "/var/log/containers/*_opsdesk-*_*.log" # <pod>_<namespace>_<container>-<id>.log
     }
     # The app writes JSON: parse it into fields under "data" and drop the raw copy (half the ingestion)
     filter = {
@@ -113,8 +115,9 @@ resource "helm_release" "fluent_bit" {
     cloudWatchLogs = {
       enabled         = true
       region          = var.region
-      logGroupName    = local.infra.app_log_group
-      logStreamPrefix = "pod-"
+      logGroupTemplate = "/$kubernetes['namespace_name']/application"
+      logGroupName     = local.environments["prod"].log_group # fallback if the namespace field is missing
+      logStreamPrefix  = "pod-"
       autoCreateGroup = false # Terraform owns the group (retention + KMS)
     }
     firehose      = { enabled = false }

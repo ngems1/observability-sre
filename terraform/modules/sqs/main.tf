@@ -6,6 +6,7 @@ resource "aws_sqs_queue" "dlq" {
   message_retention_seconds         = 1209600 # 14 days to inspect and redrive
   kms_master_key_id                 = var.kms_key_arn
   kms_data_key_reuse_period_seconds = 3600
+  tags                              = var.tags
 }
 
 resource "aws_sqs_queue" "notifications" {
@@ -20,6 +21,7 @@ resource "aws_sqs_queue" "notifications" {
     deadLetterTargetArn = aws_sqs_queue.dlq.arn
     maxReceiveCount     = var.max_receive_count
   })
+  tags = var.tags
 }
 
 resource "aws_sqs_queue_redrive_allow_policy" "dlq" {

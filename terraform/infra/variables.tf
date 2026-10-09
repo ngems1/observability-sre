@@ -8,9 +8,10 @@ variable "project" {
   default = "opsdesk"
 }
 
-variable "environment" {
-  type    = string
-  default = "demo"
+variable "environments" {
+  description = "Application environments that share the cluster; each gets its own namespace, data, secrets, roles and alarms."
+  type        = list(string)
+  default     = ["dev", "prod"]
 }
 
 variable "owner" {
@@ -118,11 +119,6 @@ variable "db_performance_insights" {
 }
 
 # ---------------------------------------------------------------- app
-variable "app_namespace" {
-  type    = string
-  default = "opsdesk"
-}
-
 variable "app_release" {
   description = "Helm release name; service account names derive from it (<release>-api, <release>-worker)."
   type        = string

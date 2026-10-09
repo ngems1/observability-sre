@@ -50,6 +50,8 @@ serviceAccount:
     annotations: {}              # EKS IRSA: eks.amazonaws.com/role-arn: arn:aws:iam::<acct>:role/opsdesk-api
   worker:
     annotations: {}
+  secrets:
+    annotations: {}              # EKS IRSA: role that may read this environment's secrets (External Secrets)
 
 podSecurityContext:
   runAsNonRoot: true
@@ -122,6 +124,12 @@ networkPolicy:
   enabled: false
   # ports the pods may reach outside the cluster (Postgres, HTTPS for AWS APIs, OTLP)
   egressPorts: [5432, 443, 4318, 9324]
+  # who may call the pods besides their own namespace (Prometheus scrapes, Alertmanager webhook)
+  ingressFromNamespaces: [observability]
+  # EKS: the ALB's subnets (generated from Terraform); the load balancer reaches the API from there
+  loadBalancerCidrs: []
+  # escape hatch, e.g. node subnets if health probes are ever blocked (weakens isolation)
+  extraIngressCidrs: []
 
 nodeSelector: {}
 tolerations: []

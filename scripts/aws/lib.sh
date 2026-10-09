@@ -17,9 +17,12 @@ export TF_IN_AUTOMATION=1
 ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
 STATE_BUCKET="opsdesk-tfstate-${ACCOUNT_ID}-${AWS_REGION}"
 export TF_VAR_state_bucket="${TF_VAR_state_bucket:-$STATE_BUCKET}"  # platform root reads infra state from here
-CLUSTER_NAME="opsdesk-demo"
-# shellcheck disable=SC2034  # used by the scripts that source this file
-APP_NS="opsdesk"
+CLUSTER_NAME="opsdesk"   # one shared cluster; dev and prod are namespaces in it
+# Which application environment a script acts on: APP_ENV=dev (default) or APP_ENV=prod
+APP_ENV="${APP_ENV:-dev}"
+case "$APP_ENV" in dev|prod) ;; *) echo "APP_ENV must be dev or prod (got '$APP_ENV')" >&2; exit 1 ;; esac
+APP_NS="opsdesk-${APP_ENV}"
+export APP_ENV APP_NS
 
 step() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m%s\033[0m\n' "$*"; }

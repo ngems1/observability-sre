@@ -13,9 +13,18 @@ variable "allowed_cidrs" {
   type        = list(string)
 }
 
-variable "app_namespace" {
-  type    = string
-  default = "opsdesk"
+variable "namespace_quotas" {
+  description = "ResourceQuota per environment namespace: dev can never take prod's capacity (noisy-neighbour drill)."
+  type = map(object({
+    requests_cpu    = string
+    requests_memory = string
+    limits_memory   = string
+    pods            = number
+  }))
+  default = {
+    dev  = { requests_cpu = "2", requests_memory = "3Gi", limits_memory = "6Gi", pods = 20 }
+    prod = { requests_cpu = "3", requests_memory = "4Gi", limits_memory = "8Gi", pods = 30 }
+  }
 }
 
 variable "prometheus_retention" {

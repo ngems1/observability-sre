@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: aws-demo
+  group: aws-platform
   cancel-in-progress: false
 
 env:
@@ -27,7 +27,7 @@ jobs:
     if: vars.AWS_ROLE_ARN != ''
     name: State bucket
     runs-on: ubuntu-latest
-    environment: demo
+    environment: prod # protected: shared platform change, reviewer approves
     steps:
       - uses: actions/checkout@v4
       - uses: hashicorp/setup-terraform@v3

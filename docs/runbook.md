@@ -3,6 +3,11 @@
 On-call guide for the alerts that open incident tickets. Every alert links to its section here (`runbook_url`) and
 names the **layer** it points at: Kubernetes, application, queue, database or network.
 
+**Which environment?** Every alert carries a `namespace` label: `opsdesk-dev` or `opsdesk-prod`. The ticket opens in
+that environment's OpsDesk (dev alerts never page prod). In the commands below, set `NS=opsdesk-dev` or
+`NS=opsdesk-prod`, pick the same environment in the dashboard's **Environment** dropdown, and run Ops workflow actions
+with the matching `environment` input. Failure drills run on dev only.
+
 ## Find the layer first (2 minutes)
 
 1. Open the ticket (UI → *Open* tab, badge **ALERT**). The alert card shows **Suspected layer**. Assign it to
@@ -57,7 +62,7 @@ early. *Fast* (critical): 14.4x the allowed rate over 1 h and 5 min — the whol
 | --- | --- |
 | Error injection (`errors-on`) | Actions → Ops → `errors-off` |
 | Bad release | Actions → Ops → `rollback` (Release already rolls back when its smoke test fails) |
-| Code bug in one route | *Errors by dependency and kind* is empty → read the `unhandled error` logs (CloudWatch Logs Insights `opsdesk-demo/errors-last-hour`) |
+| Code bug in one route | *Errors by dependency and kind* is empty → read the `unhandled error` logs (CloudWatch Logs Insights `opsdesk-<env>/errors-last-hour`) |
 
 ### OpsDeskApiLatencyHigh
 
@@ -76,8 +81,8 @@ request slow and database fast → **application** (`drill2-latency-off` if inje
 **Meaning.** No ticket-worker pod has been up for 2 minutes. Notifications queue up in SQS; the API keeps working.
 
 ```bash
-kubectl -n opsdesk get deploy,pods -l app.kubernetes.io/component=worker
-kubectl -n opsdesk describe pod -l app.kubernetes.io/component=worker | tail -20
+kubectl -n $NS get deploy,pods -l app.kubernetes.io/component=worker
+kubectl -n $NS describe pod -l app.kubernetes.io/component=worker | tail -20
 ```
 
 | Cause | Fix |
@@ -91,9 +96,14 @@ kubectl -n opsdesk describe pod -l app.kubernetes.io/component=worker | tail -20
 ### OpsDeskPodsUnavailable
 
 **Meaning.** An OpsDesk deployment has had unready pods for 5 minutes.
-`kubectl -n opsdesk describe pod <pod>` → *Events*: `ImagePullBackOff` (tag / ECR access), `CrashLoopBackOff`
+`kubectl -n $NS describe pod <pod>` → *Events*: `ImagePullBackOff` (tag / ECR access), `CrashLoopBackOff`
 (`kubectl logs --previous`), `Insufficient cpu` (Cluster Autoscaler, node group max), readiness failing (`/readyz`
 returns 503 when the database is unreachable — then the network or database alert is the real incident).
+
+`kubectl -n $NS get events | grep "exceeded quota"` → the namespace hit its **ResourceQuota** (drill 7, noisy
+neighbour): new pods are refused in that environment only, the other one is untouched. Check
+`kubectl -n $NS describe resourcequota environment-quota`; fix with `drill7-noisy-neighbour-off`, or scale down the
+workload that grew, or raise `namespace_quotas` in `terraform/platform`.
 
 ---
 
@@ -105,7 +115,7 @@ returns 503 when the database is unreachable — then the network or database al
 
 | kind | What it means | Check |
 | --- | --- | --- |
-| `connect_timeout` | packets dropped, no answer | NetworkPolicy egress ports (`kubectl -n opsdesk get networkpolicy opsdesk-egress -o yaml`), RDS security group, NACL, route table / NAT |
+| `connect_timeout` | packets dropped, no answer | NetworkPolicy egress ports (`kubectl -n $NS get networkpolicy opsdesk-egress -o yaml`), RDS security group, NACL, route table / NAT |
 | `dns` | name does not resolve | CoreDNS panel (SERVFAIL), the endpoint name in the secret |
 | `refused` | host reachable, nothing listening | dependency down or wrong port (RDS status in the console) |
 | `connection_lost` | connection dropped mid-request | RDS failover/reboot, idle timeouts |
@@ -151,7 +161,7 @@ for the worker (see *Errors by dependency and kind*); otherwise scale the worker
 ### OpsDeskDlqNotEmpty
 
 **Meaning.** A message failed 3 deliveries or could not be parsed (drill 3 poison message). AWS console → SQS →
-`opsdesk-notifications-dlq` → *Send and receive messages* → *Poll*. The matching notification row is `failed` with
+`opsdesk-<env>-notifications-dlq` → *Send and receive messages* → *Poll*. The matching notification row is `failed` with
 `last_error`. Fix the cause, then *Start DLQ redrive* for valid messages; delete poison messages.
 
 ---

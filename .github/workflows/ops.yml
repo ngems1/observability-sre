@@ -6,6 +6,11 @@ name: Ops
 on:
   workflow_dispatch:
     inputs:
+      environment:
+        description: Which environment (drills belong in dev; prod asks for approval)
+        type: choice
+        options: [dev, prod]
+        default: dev
       action:
         description: What to do
         type: choice
@@ -26,6 +31,8 @@ on:
           - drill4-pool-exhaustion-off
           - drill6-network-block-db-on
           - drill6-network-block-db-off
+          - drill7-noisy-neighbour-on
+          - drill7-noisy-neighbour-off
           - errors-on
           - errors-off
           - rollback
@@ -36,18 +43,19 @@ permissions:
   contents: read
 
 concurrency:
-  group: aws-demo
+  group: aws-ops
   cancel-in-progress: false
 
 env:
   AWS_REGION: us-east-1
   TF_VERSION: 1.12.2
+  APP_ENV: ${{ inputs.environment }} # scripts/aws/lib.sh -> namespace opsdesk-<env>
 
 jobs:
   ops:
-    name: ${{ inputs.action }}
+    name: ${{ inputs.environment }} - ${{ inputs.action }}
     runs-on: ubuntu-latest
-    environment: demo
+    environment: ${{ inputs.environment }} # GitHub environment: prod requires approval, dev does not
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -64,15 +72,16 @@ jobs:
         run: |
           source scripts/aws/lib.sh
           kubeconfig
-          date -u +"injected/started at %Y-%m-%dT%H:%M:%SZ"
-          kubectl -n opsdesk get pods,hpa -o wide
+          date -u +"injected/started at %Y-%m-%dT%H:%M:%SZ  (environment: $APP_ENV)"
+          kubectl -n "$APP_NS" get pods,hpa,resourcequota -o wide
       - name: Run ${{ inputs.action }}
         env:
           ACTION: ${{ inputs.action }}
         run: |
           source scripts/aws/lib.sh
           kubeconfig
-          NS=opsdesk
+          NS="$APP_NS"   # opsdesk-dev or opsdesk-prod: every action below stays inside this environment
+          QUEUE="opsdesk-${APP_ENV}-notifications"
           chaos() { helm upgrade opsdesk helm/opsdesk -n "$NS" --reuse-values "$@" --wait --timeout 5m; }
           # no --wait: a drill that breaks readiness must not wait for pods to become ready
           chaos_nowait() { helm upgrade opsdesk helm/opsdesk -n "$NS" --reuse-values "$@"; }
@@ -113,15 +122,16 @@ jobs:
             drill3-stuck-queue-off) kubectl -n "$NS" scale deploy/opsdesk-worker --replicas=1
                                     kubectl -n "$NS" rollout status deploy/opsdesk-worker --timeout=5m ;;
             drill3-poison-message)
-              url=$(aws sqs get-queue-url --queue-name opsdesk-notifications --query QueueUrl --output text)
+              url=$(aws sqs get-queue-url --queue-name "$QUEUE" --query QueueUrl --output text)
               aws sqs send-message --queue-url "$url" --message-body '{not valid json'
-              echo "Poison message sent: after 3 receives it lands in the DLQ (alarm: opsdesk-demo-dlq-not-empty)" ;;
+              echo "Poison message sent to $QUEUE: after 3 receives it lands in the DLQ (alarm: opsdesk-${APP_ENV}-dlq-not-empty)" ;;
             drill4-pool-exhaustion-on)
               chaos --set config.OPSDESK_DB_POOL_SIZE=20 --set config.OPSDESK_DB_MAX_OVERFLOW=10 \
                     --set api.hpa.minReplicas=6 --set api.hpa.maxReplicas=6 ;;
             drill4-pool-exhaustion-off)
+              if [[ "$APP_ENV" == prod ]]; then min=2 max=6; else min=1 max=3; fi   # values-<env>.yaml sizing
               chaos --set config.OPSDESK_DB_POOL_SIZE=5 --set config.OPSDESK_DB_MAX_OVERFLOW=5 \
-                    --set api.hpa.minReplicas=2 --set api.hpa.maxReplicas=6 ;;
+                    --set api.hpa.minReplicas=$min --set api.hpa.maxReplicas=$max ;;
             drill6-network-block-db-on)
               # Network fault: the pods' egress NetworkPolicy no longer allows 5432 (enforced by the VPC CNI).
               # The database itself stays healthy - the platform must say "network", not "database".
@@ -140,6 +150,23 @@ jobs:
               chaos_nowait --set 'networkPolicy.egressPorts={5432,443,4318}'
               kubectl -n "$NS" rollout status deploy/opsdesk-api --timeout=5m
               kubectl -n "$NS" get networkpolicy opsdesk-egress -o jsonpath='{.spec.egress[1].ports[*].port}'; echo ;;
+            drill7-noisy-neighbour-on)
+              # Isolation drill: a runaway workload in this environment asks for 30 x 200m CPU. The namespace
+              # ResourceQuota admits only what fits; the rest is refused, so the other environment keeps its capacity.
+              kubectl -n "$NS" create deployment noisy-neighbour --image=registry.k8s.io/pause:3.10 --replicas=30 \
+                --dry-run=client -o json | python3 -c '
+          import json, sys
+          d = json.load(sys.stdin); pod = d["spec"]["template"]["spec"]
+          pod["securityContext"] = {"runAsNonRoot": True, "runAsUser": 65535, "seccompProfile": {"type": "RuntimeDefault"}}
+          c = pod["containers"][0]
+          c["resources"] = {"requests": {"cpu": "200m", "memory": "64Mi"}, "limits": {"memory": "64Mi"}}
+          c["securityContext"] = {"allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}}
+          print(json.dumps(d))' | kubectl apply -f -
+              sleep 30
+              kubectl -n "$NS" get deploy noisy-neighbour
+              kubectl -n "$NS" describe resourcequota environment-quota
+              kubectl -n "$NS" get events --field-selector reason=FailedCreate --sort-by=.lastTimestamp | tail -5 ;;
+            drill7-noisy-neighbour-off) kubectl -n "$NS" delete deployment noisy-neighbour --ignore-not-found ;;
             errors-on)  chaos --set chaos.errorRate=0.2 ;;
             errors-off) chaos --set chaos.errorRate=0 ;;
             rollback)   helm rollback opsdesk 0 -n "$NS" --wait; helm history opsdesk -n "$NS" --max 5 ;;
@@ -150,4 +177,4 @@ jobs:
           source scripts/aws/lib.sh
           kubeconfig
           date -u +"finished at %Y-%m-%dT%H:%M:%SZ"
-          kubectl -n opsdesk get pods,hpa -o wide
+          kubectl -n "$APP_NS" get pods,hpa,resourcequota -o wide

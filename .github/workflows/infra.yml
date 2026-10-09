@@ -1,5 +1,5 @@
 # Terraform for AWS: plan on pull requests and pushes, apply only on demand (Actions -> Infrastructure -> Run).
-# Apply is gated by the protected "demo" environment (required reviewer) and uses GitHub OIDC:
+# Apply is gated by the protected "prod" environment (required reviewer) and uses GitHub OIDC:
 # short-lived credentials from the opsdesk-github-deploy role, no AWS keys stored anywhere.
 # Apply is manual on purpose: the environment is torn down nightly to save money (see destroy.yml).
 name: Infrastructure
@@ -24,7 +24,7 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: aws-demo # never two Terraform runs (or deploys) at the same time
+  group: aws-platform # never two Terraform runs (or deploys) at the same time
   cancel-in-progress: false
 
 env:
@@ -83,7 +83,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.action == 'apply'
     name: Apply infra + platform
     runs-on: ubuntu-latest
-    environment: demo # protected environment: required reviewer approves before AWS is touched
+    environment: prod # protected: the shared cluster and both environments change; a reviewer approves first
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -118,6 +118,6 @@ jobs:
             echo "### Environment"
             echo "- Cluster: \`$CLUSTER_NAME\` ($(kubectl get nodes --no-headers 2>/dev/null | wc -l) nodes)"
             echo "- Next: run **Release** to build and deploy the app"
-            echo "- Grafana login: AWS console -> Secrets Manager -> \`opsdesk-demo/grafana\`"
-            echo "- Demo API keys: AWS console -> Secrets Manager -> \`opsdesk-demo/app\` (bootstrap_users)"
+            echo "- Grafana login: AWS console -> Secrets Manager -> \`opsdesk/grafana\`"
+            echo "- Demo API keys: Secrets Manager -> \`opsdesk-dev/app\` and \`opsdesk-prod/app\` (bootstrap_users)"
           } >> "$GITHUB_STEP_SUMMARY"

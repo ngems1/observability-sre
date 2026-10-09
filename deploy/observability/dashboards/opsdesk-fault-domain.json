@@ -13,7 +13,7 @@
     "from": "now-1h",
     "to": "now"
   },
-  "description": "Incident triage: one row per layer on the same time axis. Read the verdict tiles left to right.",
+  "description": "Incident triage for one environment (dropdown): one row per layer on the same time axis. Read the verdict tiles left to right.",
   "panels": [
     {
       "id": 1,
@@ -1259,21 +1259,22 @@
     "list": [
       {
         "name": "namespace",
-        "type": "custom",
-        "query": "opsdesk",
-        "current": {
-          "text": "opsdesk",
-          "value": "opsdesk"
+        "label": "Environment",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
         },
-        "options": [
-          {
-            "text": "opsdesk",
-            "value": "opsdesk",
-            "selected": true
-          }
-        ],
-        "hide": 0,
-        "label": "Namespace"
+        "query": {
+          "query": "label_values(up{job=~\".*opsdesk-api.*\"}, namespace)",
+          "refId": "ns"
+        },
+        "definition": "label_values(up{job=~\".*opsdesk-api.*\"}, namespace)",
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": false,
+        "multi": false,
+        "hide": 0
       }
     ]
   },

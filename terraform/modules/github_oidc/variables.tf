@@ -15,7 +15,7 @@ variable "role_name" {
 variable "allowed_subjects" {
   description = "OIDC subject suffixes allowed to assume the role (branch, pull requests, environment)."
   type        = list(string)
-  default     = ["ref:refs/heads/main", "pull_request", "environment:demo"]
+  default     = ["ref:refs/heads/main", "pull_request", "environment:dev", "environment:prod"]
 }
 
 variable "create_oidc_provider" {

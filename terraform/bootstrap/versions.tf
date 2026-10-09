@@ -14,7 +14,7 @@ provider "aws" {
   default_tags {
     tags = {
       Project   = var.project
-      Env       = "demo"
+      Env       = "shared"
       ManagedBy = "terraform"
       Component = "bootstrap"
     }

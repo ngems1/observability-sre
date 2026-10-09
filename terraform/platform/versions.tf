@@ -24,7 +24,7 @@ terraform {
   }
 
   backend "s3" {
-    key          = "opsdesk/demo/platform.tfstate"
+    key          = "opsdesk/platform.tfstate"
     region       = "us-east-1"
     encrypt      = true
     use_lockfile = true
@@ -35,7 +35,7 @@ data "terraform_remote_state" "infra" {
   backend = "s3"
   config = {
     bucket = var.state_bucket
-    key    = "opsdesk/demo/infra.tfstate"
+    key    = "opsdesk/infra.tfstate"
     region = var.region
   }
 }
@@ -44,6 +44,7 @@ locals {
   infra        = data.terraform_remote_state.infra.outputs
   cluster_name = local.infra.cluster_name
   roles        = local.infra.irsa_role_arns
+  environments = local.infra.environments # { dev = { namespace, log_group }, prod = { ... } }
 }
 
 provider "aws" {

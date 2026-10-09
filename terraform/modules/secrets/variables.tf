@@ -25,3 +25,9 @@ variable "slack_webhook_url" {
   default     = ""
   sensitive   = true
 }
+
+variable "tags" {
+  description = "Extra tags (e.g. Env = dev) on top of the provider default tags."
+  type        = map(string)
+  default     = {}
+}

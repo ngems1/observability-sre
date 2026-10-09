@@ -1,0 +1,15 @@
+# dev: deployed automatically on every push to main. Small, cheap, the place to run failure drills.
+config:
+  OPSDESK_ENVIRONMENT: dev           # shown as a DEV badge in the web UI
+
+api:
+  replicas: 1
+  hpa:
+    enabled: true
+    minReplicas: 1
+    maxReplicas: 3
+  pdb:
+    minAvailable: 0                  # single replica in dev: allow node drains
+
+worker:
+  replicas: 1

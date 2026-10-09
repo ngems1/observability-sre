@@ -8,7 +8,7 @@ locals {
   oidc_url          = "token.actions.githubusercontent.com"
   oidc_provider_arn = var.create_oidc_provider ? aws_iam_openid_connect_provider.github[0].arn : "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:oidc-provider/${local.oidc_url}"
 
-  # Who may assume the role: the main branch, pull requests and the protected "demo" environment of ONE repository
+  # Who may assume the role: the main branch, pull requests and the dev / prod environments of ONE repository
   allowed_subjects = [for s in var.allowed_subjects : "repo:${var.github_repository}:${s}"]
 }
 
@@ -52,7 +52,7 @@ resource "aws_iam_role" "deploy" {
 # Documented gap (docs/security/findings.md): split into a read-only plan role and an apply role with a
 # permissions boundary in production.
 resource "aws_iam_role_policy_attachment" "deploy_admin" {
-  #checkov:skip=CKV_AWS_274:Lab account; trust is limited to one repo's main branch, PRs and the approved demo environment
+  #checkov:skip=CKV_AWS_274:Lab account; trust is limited to one repo's main branch, PRs and its dev / prod environments
   role       = aws_iam_role.deploy.name
   policy_arn = "arn:${data.aws_partition.current.partition}:iam::aws:policy/AdministratorAccess"
 }

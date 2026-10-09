@@ -119,19 +119,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
-      - name: helm lint (local + EKS values)
+      - name: helm lint (local + EKS dev/prod values)
         run: |
           helm lint helm/opsdesk -f helm/opsdesk/values-local.yaml
-          helm lint helm/opsdesk -f helm/opsdesk/values-eks.yaml -f helm/opsdesk/ci/values-eks-ci.yaml
-      - name: Render EKS manifests
+          for env in dev prod; do
+            helm lint helm/opsdesk -f helm/opsdesk/values-eks.yaml -f "helm/opsdesk/values-$env.yaml" -f helm/opsdesk/ci/values-eks-ci.yaml
+          done
+      - name: Render EKS manifests (dev and prod)
         run: |
           mkdir -p rendered
-          helm template opsdesk helm/opsdesk -n opsdesk \
-            -f helm/opsdesk/values-eks.yaml -f helm/opsdesk/ci/values-eks-ci.yaml > rendered/eks.yaml
+          for env in dev prod; do
+            helm template opsdesk helm/opsdesk -n "opsdesk-$env" \
+              -f helm/opsdesk/values-eks.yaml -f "helm/opsdesk/values-$env.yaml" -f helm/opsdesk/ci/values-eks-ci.yaml \
+              > "rendered/eks-$env.yaml"
+          done
       - name: kubeconform (schemas; CRDs skipped)
         run: |
           curl -fsSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" | tar xz
-          ./kubeconform -strict -summary -ignore-missing-schemas rendered/eks.yaml
+          ./kubeconform -strict -summary -ignore-missing-schemas rendered/*.yaml
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

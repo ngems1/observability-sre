@@ -1,6 +1,7 @@
 # Release pipeline (every push to main, or Actions -> Release -> Run):
 #   CI (tests, lint, Trivy, Checkov, Helm) -> build immutable image (commit SHA) -> Trivy gate -> push to ECR
-#   -> [approval: demo environment] -> helm upgrade --atomic -> smoke test -> automatic rollback on failure
+#   -> dev:  helm upgrade --atomic into opsdesk-dev -> smoke test -> automatic rollback on failure
+#   -> [approval: GitHub environment "prod"] -> prod: the SAME image into opsdesk-prod -> smoke -> rollback
 # If the AWS environment is down (destroyed for the night), build/deploy are skipped with a notice.
 name: Release
 
@@ -15,7 +16,7 @@ permissions:
   security-events: write
 
 concurrency:
-  group: aws-demo
+  group: aws-release
   cancel-in-progress: false
 
 env:
@@ -42,7 +43,7 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
       - id: check
         run: |
-          if aws eks describe-cluster --name opsdesk-demo >/dev/null 2>&1 \
+          if aws eks describe-cluster --name opsdesk >/dev/null 2>&1 \
              && repo=$(aws ecr describe-repositories --repository-names opsdesk --query 'repositories[0].repositoryUri' --output text 2>/dev/null); then
             echo "up=true" >> "$GITHUB_OUTPUT"; echo "repo=$repo" >> "$GITHUB_OUTPUT"
           else
@@ -84,12 +85,14 @@ jobs:
           aws ecr describe-image-scan-findings --repository-name opsdesk --image-id imageTag=${{ steps.meta.outputs.tag }} \
             --query 'imageScanFindings.findingSeverityCounts' --output table || true
 
-  deploy:
-    name: Deploy to EKS (demo)
+  deploy-dev:
+    name: Deploy to dev
     needs: [environment, build]
     runs-on: ubuntu-latest
-    environment: demo # required reviewer approves the deployment
+    environment: dev # no reviewer: every green build of main lands in dev
     timeout-minutes: 30
+    env:
+      APP_ENV: dev
     steps:
       - uses: actions/checkout@v4
       - uses: hashicorp/setup-terraform@v3
@@ -101,7 +104,7 @@ jobs:
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-      - name: helm upgrade --atomic + smoke test
+      - name: helm upgrade --atomic + smoke test (opsdesk-dev)
         env:
           TAG: ${{ needs.build.outputs.tag }}
         run: bash scripts/aws/deploy-app.sh --no-build
@@ -110,7 +113,7 @@ jobs:
         run: |
           source scripts/aws/lib.sh
           kubeconfig
-          helm rollback opsdesk 0 -n "$APP_NS" --wait && echo "::warning::Rolled back to the previous release"
+          helm rollback opsdesk 0 -n "$APP_NS" --wait && echo "::warning::dev rolled back to the previous release"
           helm history opsdesk -n "$APP_NS" --max 5
       - name: Summary
         if: success()
@@ -119,8 +122,50 @@ jobs:
           kubeconfig
           host=$(kubectl -n "$APP_NS" get ingress opsdesk-api -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
           {
-            echo "### Deployed opsdesk:${{ needs.build.outputs.tag }}"
+            echo "### dev: opsdesk:${{ needs.build.outputs.tag }}"
             echo "- Web UI: http://${host}/"
-            echo "- Grafana: http://${host}/grafana (login in Secrets Manager \`opsdesk-demo/grafana\`)"
-            echo "- Rollback: Actions -> Ops -> rollback"
+            echo "- Next: approve **Deploy to prod** to promote this exact image"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-prod:
+    name: Promote to prod
+    needs: [build, deploy-dev]
+    runs-on: ubuntu-latest
+    environment: prod # required reviewer: promotion of the image dev already runs
+    timeout-minutes: 30
+    env:
+      APP_ENV: prod
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      - uses: azure/setup-helm@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: helm upgrade --atomic + smoke test (opsdesk-prod)
+        env:
+          TAG: ${{ needs.build.outputs.tag }}
+        run: bash scripts/aws/deploy-app.sh --no-build
+      - name: Roll back on failure
+        if: failure()
+        run: |
+          source scripts/aws/lib.sh
+          kubeconfig
+          helm rollback opsdesk 0 -n "$APP_NS" --wait && echo "::warning::prod rolled back to the previous release"
+          helm history opsdesk -n "$APP_NS" --max 5
+      - name: Summary
+        if: success()
+        run: |
+          source scripts/aws/lib.sh
+          kubeconfig
+          host=$(kubectl -n "$APP_NS" get ingress opsdesk-api -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+          {
+            echo "### prod: opsdesk:${{ needs.build.outputs.tag }} (same image as dev)"
+            echo "- Web UI: http://${host}/"
+            echo "- Grafana: http://${host}/grafana (login in Secrets Manager \`opsdesk/grafana\`)"
+            echo "- Rollback: Actions -> Ops -> environment prod -> rollback"
           } >> "$GITHUB_STEP_SUMMARY"

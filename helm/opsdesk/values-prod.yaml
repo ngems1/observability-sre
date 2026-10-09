@@ -1,0 +1,15 @@
+# prod: the same image as dev, promoted after approval (GitHub environment "prod").
+config:
+  OPSDESK_ENVIRONMENT: prod
+
+api:
+  replicas: 2
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+  pdb:
+    minAvailable: 1                  # always one API pod during node drains and rollouts
+
+worker:
+  replicas: 1

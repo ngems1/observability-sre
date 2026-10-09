@@ -1,12 +1,12 @@
-# EKS overrides. Environment-specific values (ECR repo, IRSA role ARNs, secret ARNs, DB host,
-# ALB annotations) are generated from Terraform outputs into values-eks.generated.yaml by
-# scripts/aws/deploy-app.sh and layered on top of this file.
+# EKS overrides shared by every environment. Layering (scripts/aws/deploy-app.sh):
+#   values.yaml -> values-eks.yaml -> values-<env>.yaml (dev / prod sizing) -> generated from Terraform
+#   (ECR repo, IRSA role ARNs, secret names, DB host, queue name, ALB annotations, load-balancer CIDRs).
+# Each environment is its own Helm release named "opsdesk" in its own namespace (opsdesk-dev, opsdesk-prod).
 
 image:
   pullPolicy: IfNotPresent
 
 config:
-  OPSDESK_ENVIRONMENT: eks
   OPSDESK_LOG_LEVEL: INFO
   OPSDESK_SQS_MAX_RECEIVE_COUNT: "3"
   OPSDESK_DB_POOL_SIZE: "5"

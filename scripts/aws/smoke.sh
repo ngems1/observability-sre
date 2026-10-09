@@ -5,7 +5,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 PORT="${SMOKE_PORT:-18080}"
 ensure_init infra
-KEYS_JSON="$(tf infra output -json demo_api_keys)"
+KEYS_JSON="$(tf infra output -json demo_api_keys | python3 -c 'import sys,json;print(json.dumps(json.load(sys.stdin)[sys.argv[1]]))' "$APP_ENV")"
 key() { python3 -c "import sys,json;print(json.loads(sys.argv[1])[sys.argv[2]]['api_key'])" "$KEYS_JSON" "$1"; }
 REQ="$(key alice)"; APPR="$(key bob)"
 

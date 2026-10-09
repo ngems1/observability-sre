@@ -14,7 +14,7 @@ terraform {
 
   # Partial config: bucket comes from `-backend-config=bucket=<bootstrap output>`
   backend "s3" {
-    key          = "opsdesk/demo/infra.tfstate"
+    key          = "opsdesk/infra.tfstate"
     region       = "us-east-1"
     encrypt      = true
     use_lockfile = true

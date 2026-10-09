@@ -1,5 +1,6 @@
-# Runs k6 continuously inside the cluster (namespace opsdesk-deps, so the
-# app namespace keeps its "restricted" Pod Security level).
+# Runs k6 continuously inside the cluster. Docker Desktop: namespace opsdesk-deps. EKS: scripts/aws/load.sh
+# rewrites it into the environment's own namespace (opsdesk-dev / opsdesk-prod), which only admits traffic
+# from inside the namespace; the pod meets Pod Security "restricted".
 #   kubectl apply -f load/k6-deployment.yaml
 #   kubectl -n opsdesk-deps scale deploy/k6-load --replicas=0   # stop the load
 apiVersion: v1
@@ -106,9 +107,19 @@ spec:
     metadata:
       labels: { app: k6-load }
     spec:
+      # Pod Security "restricted": runs inside the app namespaces on EKS (opsdesk-dev / opsdesk-prod)
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 12345        # the k6 image's own user
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: k6
           image: grafana/k6:1.0.0
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           args: ["run", "--quiet", "/scripts/opsdesk.js"]
           env:
             - name: BASE_URL

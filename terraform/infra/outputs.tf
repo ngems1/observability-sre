@@ -20,6 +20,11 @@ output "vpc_id" {
   value = module.network.vpc_id
 }
 
+# The ALB lives in the public subnets: the app's NetworkPolicy admits load-balancer traffic from these ranges only
+output "public_subnet_cidrs" {
+  value = [for i, _ in local.azs : cidrsubnet(var.vpc_cidr, 8, i)]
+}
+
 output "ecr_repository_url" {
   value = module.ecr.repository_url
 }
@@ -37,45 +42,52 @@ output "kms_key_arn" {
   value = module.kms.key_arn
 }
 
-output "app_log_group" {
-  value = module.observability.app_log_group_name
+output "environments" {
+  description = "Per-environment facts for the platform root: namespace and log group."
+  value       = { for k, e in module.env : k => { namespace = e.namespace, log_group = e.log_group_name } }
 }
 
-# Everything the Helm chart needs on EKS. scripts/aws/deploy-app.sh writes this to
-# helm/opsdesk/values-eks.generated.yaml (git-ignored) and layers it on values-eks.yaml.
+# Everything the Helm chart needs, per environment. scripts/aws/deploy-app.sh picks .<env> and writes it to
+# helm/opsdesk/values-eks.generated.yaml (git-ignored), layered on values-eks.yaml + values-<env>.yaml.
 output "helm_values" {
-  value = yamlencode({
-    image = {
-      repository = module.ecr.repository_url
-    }
-    config = {
-      OPSDESK_AWS_REGION     = var.region
-      OPSDESK_SQS_QUEUE_NAME = module.sqs.queue_name
-    }
-    serviceAccount = {
-      api    = { annotations = { "eks.amazonaws.com/role-arn" = module.irsa.role_arns.ticket_api } }
-      worker = { annotations = { "eks.amazonaws.com/role-arn" = module.irsa.role_arns.ticket_worker } }
-    }
-    externalSecrets = {
-      enabled       = true
-      region        = var.region
-      appSecretName = module.secrets.secret_name
-      dbSecretArn   = module.rds.master_user_secret_arn
-      dbHost        = module.rds.address
-      dbName        = module.rds.db_name
-    }
-  })
+  value = {
+    for k, e in module.env : k => yamlencode({
+      image = {
+        repository = module.ecr.repository_url
+      }
+      config = {
+        OPSDESK_AWS_REGION     = var.region
+        OPSDESK_SQS_QUEUE_NAME = e.queue_name
+      }
+      serviceAccount = {
+        api     = { annotations = { "eks.amazonaws.com/role-arn" = e.role_arns["api"] } }
+        worker  = { annotations = { "eks.amazonaws.com/role-arn" = e.role_arns["worker"] } }
+        secrets = { annotations = { "eks.amazonaws.com/role-arn" = e.role_arns["secrets"] } }
+      }
+      externalSecrets = {
+        enabled       = true
+        region        = var.region
+        appSecretName = e.app_secret_name
+        dbSecretArn   = e.db_secret_arn
+        dbHost        = e.db_host
+        dbName        = e.db_name
+      }
+      networkPolicy = {
+        loadBalancerCidrs = [for i, _ in local.azs : cidrsubnet(var.vpc_cidr, 8, i)]
+      }
+    })
+  }
 }
 
-# Demo login keys (also in Secrets Manager). `terraform output -json demo_api_keys`
+# Demo login keys per environment (also in Secrets Manager <project>-<env>/app)
 output "demo_api_keys" {
-  value     = module.secrets.demo_api_keys
+  value     = { for k, e in module.env : k => e.demo_api_keys }
   sensitive = true
 }
 
-# Read by the platform root (remote state) to give Alertmanager the same bearer token as the API
-output "alert_webhook_token" {
-  value     = module.secrets.alert_webhook_token
+# Read by the platform root (remote state): Alertmanager uses each environment's own bearer token
+output "alert_webhook_tokens" {
+  value     = { for k, e in module.env : k => e.alert_webhook_token }
   sensitive = true
 }
 

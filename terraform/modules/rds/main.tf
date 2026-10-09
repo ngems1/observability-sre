@@ -5,6 +5,7 @@ resource "aws_security_group" "rds" {
   name        = "${var.name}-rds"
   description = "PostgreSQL from EKS nodes only"
   vpc_id      = var.vpc_id
+  tags        = var.tags
 }
 
 resource "aws_vpc_security_group_ingress_rule" "rds_from_nodes" {
@@ -19,6 +20,7 @@ resource "aws_vpc_security_group_ingress_rule" "rds_from_nodes" {
 resource "aws_db_parameter_group" "pg16" {
   name   = "${var.name}-pg16"
   family = "postgres16"
+  tags   = var.tags
 
   parameter {
     name  = "log_min_duration_statement"
@@ -35,7 +37,7 @@ resource "aws_db_parameter_group" "pg16" {
 }
 
 resource "aws_db_instance" "main" {
-  #checkov:skip=CKV_AWS_293:Demo environment is destroyed daily; deletion protection on in production
+  #checkov:skip=CKV_AWS_293:Lab platform (dev and prod) is destroyed after each session; turn on for a real prod
   #checkov:skip=CKV_AWS_157:Single-AZ for cost (multi_az variable); Multi-AZ in production
   #checkov:skip=CKV_AWS_353:Performance Insights optional (performance_insights variable); slow-query log covers drill 2
   #checkov:skip=CKV_AWS_118:Enhanced monitoring adds cost; CloudWatch RDS metrics + alarms are enough for the demo
@@ -73,9 +75,10 @@ resource "aws_db_instance" "main" {
   # IAM auth available for humans/tools (break-glass access without the master password)
   iam_database_authentication_enabled = true
 
-  deletion_protection = false # demo: allow terraform destroy
+  deletion_protection = false # lab: the Destroy workflow removes both environments
   skip_final_snapshot = true
   apply_immediately   = true
+  tags                = var.tags
 
   # create the log group first (retention + KMS) so RDS does not create an unmanaged one
   depends_on = [aws_cloudwatch_log_group.rds]
@@ -86,4 +89,5 @@ resource "aws_cloudwatch_log_group" "rds" {
   name              = "/aws/rds/instance/${var.name}-pg/postgresql"
   retention_in_days = var.log_retention_days
   kms_key_id        = var.kms_key_arn
+  tags              = var.tags
 }

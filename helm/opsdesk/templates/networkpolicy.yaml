@@ -15,7 +15,9 @@ spec:
       app.kubernetes.io/instance: {{ .Release.Name }}
   policyTypes: [Ingress, Egress]
 ---
-# 2. ticket-api: HTTP in from anywhere in the cluster / ALB, metrics from monitoring
+# 2. ticket-api: only from its own namespace (k6, drills), the observability namespace (Prometheus scrapes,
+#    Alertmanager webhook) and the load balancer subnets (ALB, ip targets). Never from another environment.
+#    Kubelet probes come from the node IP, which the VPC CNI network policy agent allows automatically.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -32,10 +34,19 @@ spec:
     - ports:
         - port: {{ .Values.api.port }}
           protocol: TCP
+      from:
+        - podSelector: {}
+        {{- range .Values.networkPolicy.ingressFromNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . }}
+        {{- end }}
+        {{- range concat .Values.networkPolicy.loadBalancerCidrs .Values.networkPolicy.extraIngressCidrs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
 ---
-# 3. ticket-worker: only its metrics/health port is reachable (Prometheus scrapes, kubelet probes).
-#    No "from" selector: on EKS the VPC CNI evaluates kubelet probes from the node IP, so a
-#    namespace-only rule would fail the liveness probe. The port serves /metrics and /healthz only.
+# 3. ticket-worker: only its metrics/health port, only from its own namespace and the observability namespace.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -52,6 +63,17 @@ spec:
     - ports:
         - port: {{ .Values.worker.metricsPort }}
           protocol: TCP
+      from:
+        - podSelector: {}
+        {{- range .Values.networkPolicy.ingressFromNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . }}
+        {{- end }}
+        {{- range .Values.networkPolicy.extraIngressCidrs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
 ---
 # 4. Egress: DNS + the dependency ports only
 apiVersion: networking.k8s.io/v1
