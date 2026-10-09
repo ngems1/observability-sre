@@ -29,9 +29,14 @@ spec:
       rules:
         {{- range $w := list "5m" "30m" "1h" "6h" }}
         - record: opsdesk:api_error_ratio:rate{{ $w }}
+          # by (namespace): dev and prod record separate series. "or ... * 0": 0 % (not "no data") while
+          # there is traffic but no 5xx yet, so the error-budget tile and burn-rate alerts always have a value.
           expr: |
-            sum(rate(http_server_request_duration_seconds_count{ {{- $api -}},status_code=~"5.."}[{{ $w }}]))
-              / sum(rate(http_server_request_duration_seconds_count{ {{- $api -}} }[{{ $w }}]))
+            (
+              sum by (namespace) (rate(http_server_request_duration_seconds_count{ {{- $api -}},status_code=~"5.."}[{{ $w }}]))
+                or sum by (namespace) (rate(http_server_request_duration_seconds_count{ {{- $api -}} }[{{ $w }}])) * 0
+            )
+              / sum by (namespace) (rate(http_server_request_duration_seconds_count{ {{- $api -}} }[{{ $w }}]))
         {{- end }}
 
     # ---------------------------------------------------------- symptoms (what users feel)
@@ -41,8 +46,8 @@ spec:
         # in 1 h, slow = 5% in 6 h. The short window makes the alert stop quickly after recovery.
         - alert: OpsDeskErrorBudgetBurn
           expr: |
-            opsdesk:api_error_ratio:rate1h > (14.4 * {{ $budget }})
-              and opsdesk:api_error_ratio:rate5m > (14.4 * {{ $budget }})
+            opsdesk:api_error_ratio:rate1h{ {{- $sel -}} } > (14.4 * {{ $budget }})
+              and opsdesk:api_error_ratio:rate5m{ {{- $sel -}} } > (14.4 * {{ $budget }})
           for: 2m
           labels:
             severity: critical
@@ -59,8 +64,8 @@ spec:
             {{- end }}
         - alert: OpsDeskErrorBudgetBurn
           expr: |
-            opsdesk:api_error_ratio:rate6h > (6 * {{ $budget }})
-              and opsdesk:api_error_ratio:rate30m > (6 * {{ $budget }})
+            opsdesk:api_error_ratio:rate6h{ {{- $sel -}} } > (6 * {{ $budget }})
+              and opsdesk:api_error_ratio:rate30m{ {{- $sel -}} } > (6 * {{ $budget }})
           for: 15m
           labels:
             severity: warning

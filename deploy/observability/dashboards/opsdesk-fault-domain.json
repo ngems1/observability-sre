@@ -350,7 +350,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "1 - (avg_over_time(opsdesk:api_error_ratio:rate5m[30d]) / (1 - 0.995))",
+          "expr": "1 - (avg_over_time(opsdesk:api_error_ratio:rate5m{namespace=\"$namespace\"}[30d]) / (1 - 0.995))",
           "legendFormat": "Error budget left (30 d)",
           "exemplar": false
         }
