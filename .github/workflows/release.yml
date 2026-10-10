@@ -72,17 +72,36 @@ jobs:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
       - uses: aws-actions/amazon-ecr-login@v2
+      # ECR tags are immutable and the tag is derived from the commit, so a second Release run on the
+      # same commit would try to overwrite it. One commit = one image: reuse what is already there.
+      - name: Is this commit already in ECR?
+        id: image
+        run: |
+          if aws ecr describe-images --repository-name opsdesk \
+               --image-ids imageTag=${{ steps.meta.outputs.tag }} >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Image reused::${{ steps.meta.outputs.tag }} is already in ECR; pulling it instead of rebuilding."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Build (immutable tag = commit SHA)
+        if: steps.image.outputs.exists == 'false'
         run: |
           docker build --platform linux/amd64 \
             --label org.opencontainers.image.revision="$GITHUB_SHA" \
             -t "${{ needs.environment.outputs.repo }}:${{ steps.meta.outputs.tag }}" app
+      - name: Pull the existing image
+        if: steps.image.outputs.exists == 'true'
+        run: docker pull "${{ needs.environment.outputs.repo }}:${{ steps.meta.outputs.tag }}"
+      # Runs on every release, new image or reused: the Trivy database moves, so yesterday's clean
+      # image can fail today. The gate is on what will actually be deployed.
       - name: Trivy gate (fixable CRITICAL/HIGH block the release)
         run: |
           docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$TRIVY_IMAGE" image \
             --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1 \
             "${{ needs.environment.outputs.repo }}:${{ steps.meta.outputs.tag }}"
       - name: Push to ECR
+        if: steps.image.outputs.exists == 'false'
         run: docker push "${{ needs.environment.outputs.repo }}:${{ steps.meta.outputs.tag }}"
       - name: ECR scan-on-push result
         run: |
