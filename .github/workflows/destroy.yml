@@ -24,6 +24,7 @@ env:
   TF_VAR_owner: ${{ vars.OWNER }}
   TF_VAR_alert_email: ${{ vars.ALERT_EMAIL }}
   TF_VAR_allowed_cidrs: ${{ vars.ALLOWED_CIDRS }}
+  TF_VAR_domain_name: ${{ vars.DOMAIN_NAME }}
   TF_VAR_admin_principal_arns: ${{ vars.CONSOLE_ADMIN_ARNS || '[]' }}
 
 jobs:

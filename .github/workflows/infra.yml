@@ -35,6 +35,7 @@ env:
   TF_VAR_owner: ${{ vars.OWNER }}
   TF_VAR_alert_email: ${{ vars.ALERT_EMAIL }}
   TF_VAR_allowed_cidrs: ${{ vars.ALLOWED_CIDRS }}
+  TF_VAR_domain_name: ${{ vars.DOMAIN_NAME }}
   TF_VAR_admin_principal_arns: ${{ vars.CONSOLE_ADMIN_ARNS || '[]' }}
   # Cost options (docs/cost.md): NODE_CAPACITY_TYPE=SPOT, NODE_INSTANCE_TYPES=["m5.large","m5a.large","m6i.large"], NODE_DESIRED_SIZE=2
   TF_VAR_node_capacity_type: ${{ vars.NODE_CAPACITY_TYPE || 'ON_DEMAND' }}

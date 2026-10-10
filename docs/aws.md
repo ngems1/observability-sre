@@ -151,6 +151,35 @@ available, `terraform -chdir=terraform/bootstrap apply` creates the whole bootst
 **4. Billing → Cost allocation tags** → activate `Project`, `Env`, `Owner` after the first apply (takes up to 24 h),
 and confirm the SNS subscription email AWS sends to `ALERT_EMAIL`.
 
+**5. Optional: HTTPS on a custom domain.** Register a domain and create its **public hosted zone in Route 53 by
+hand** — the zone is deliberately *not* managed by Terraform, because recreating it changes the NS records and
+breaks the registrar's delegation. Then set the repository variable `DOMAIN_NAME` to the apex (e.g.
+`example.click`) and run **Bootstrap** again: it issues one ACM certificate for `<domain>` and `*.<domain>` and
+validates it by DNS. Bootstrap must succeed before Infrastructure, which looks the certificate up by domain.
+
+With `DOMAIN_NAME` set, each environment gets a stable HTTPS URL and plain HTTP is redirected to it:
+
+| | URL | Grafana |
+| --- | --- | --- |
+| dev | `https://dev.<domain>` | `https://dev.<domain>/grafana` |
+| prod | `https://opsdesk.<domain>` | `https://opsdesk.<domain>/grafana` |
+
+The certificate lives in the **bootstrap** root on purpose: ACM certificates are free, DNS validation takes a few
+minutes, and bootstrap survives `Destroy` — so the certificate is issued once instead of being re-validated on
+every rebuild. The records are kept by **external-dns** running in the cluster, which watches each Ingress and
+repoints the alias at whatever ALB the load balancer controller created. That matters because the environment is
+torn down nightly: every rebuild produces a new ALB hostname, and without external-dns the records would have to
+be repointed by hand each morning. While the environment is down the records point at a load balancer that no
+longer exists, and the name starts resolving again a few minutes after the next deploy.
+
+Note that an Ingress with a hostname only answers to that hostname: once `DOMAIN_NAME` is set, the raw
+`k8s-...elb.amazonaws.com` address returns 404. Use the domain. Leave `DOMAIN_NAME` unset and everything stays on
+HTTP at the raw load-balancer hostname, exactly as before.
+
+`ALLOWED_CIDRS` is unchanged by any of this and still decides who may reach the load balancer: your own
+`x.x.x.x/32` keeps the demo private, `0.0.0.0/0` opens it to anyone with the URL, leaving the app's own sign-in as
+the only control.
+
 ## Bring it up
 
 | Step | GitHub → Actions | Time |

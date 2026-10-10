@@ -22,6 +22,7 @@ output "helm_values" {
         OPSDESK_GRAFANA_URL                 = "/grafana" # the shared Grafana, routed on each environment's ALB
       }
       ingress = {
+        host = try(local.env_hosts[env], "")
         annotations = merge(local.alb_common_annotations, {
           "alb.ingress.kubernetes.io/group.name"       = "opsdesk-${env}"
           "alb.ingress.kubernetes.io/group.order"      = "20"

@@ -22,3 +22,9 @@ variable "app_log_group_arns" {
   description = "Log groups Fluent Bit may write to (one per environment)."
   type        = list(string)
 }
+
+variable "domain_name" {
+  description = "Optional Route 53 domain external-dns may write to. Empty = no external-dns role."
+  type        = string
+  default     = ""
+}

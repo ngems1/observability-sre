@@ -1,3 +1,7 @@
 # Optional: copy to terraform.tfvars only if the defaults do not fit.
 # github_repository    = "ngems1/observability-sre"
 # create_oidc_provider = false   # if IAM -> Identity providers already has token.actions.githubusercontent.com
+
+# Optional custom domain: apex of an EXISTING Route 53 public hosted zone (the zone itself stays clickops).
+# Set it and bootstrap issues an ACM certificate for <domain> and *.<domain>, validated by DNS.
+# domain_name = "example.click"

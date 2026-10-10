@@ -9,8 +9,14 @@ variable "state_bucket" {
 }
 
 variable "allowed_cidrs" {
-  description = "Who may reach the ALB (app + Grafana). Use your public IP as x.x.x.x/32. The app is an internal tool: do not open it to 0.0.0.0/0."
+  description = "Who may reach the ALB (app + Grafana). Your public IP as x.x.x.x/32 keeps it private; 0.0.0.0/0 opens the demo to anyone with the URL, leaving the app login as the only control."
   type        = list(string)
+}
+
+variable "domain_name" {
+  description = "Optional. Apex of the Route 53 hosted zone (same value as the bootstrap root), e.g. example.click. Set: HTTPS on dev.<domain> and opsdesk.<domain>, with HTTP redirected. Empty: HTTP on the raw load-balancer hostname."
+  type        = string
+  default     = ""
 }
 
 variable "namespace_quotas" {

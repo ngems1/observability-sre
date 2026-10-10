@@ -15,3 +15,6 @@ alert_email = "you@example.com"
 # enable_securityhub = true
 # enable_inspector   = true
 # enable_cloudtrail  = true
+
+# Same value as the bootstrap root. Only used to scope external-dns to that one hosted zone.
+# domain_name = "example.click"

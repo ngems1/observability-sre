@@ -113,16 +113,49 @@ resource "helm_release" "fluent_bit" {
     }
     cloudWatch = { enabled = false } # legacy Go plugin
     cloudWatchLogs = {
-      enabled         = true
-      region          = var.region
+      enabled          = true
+      region           = var.region
       logGroupTemplate = "/$kubernetes['namespace_name']/application"
       logGroupName     = local.environments["prod"].log_group # fallback if the namespace field is missing
       logStreamPrefix  = "pod-"
-      autoCreateGroup = false # Terraform owns the group (retention + KMS)
+      autoCreateGroup  = false # Terraform owns the group (retention + KMS)
     }
     firehose      = { enabled = false }
     kinesis       = { enabled = false }
     elasticsearch = { enabled = false }
+  })]
+
+  depends_on = [helm_release.aws_lb_controller]
+}
+
+# ---------------------------------------------------------------- external-dns: Ingress -> Route 53
+# The load balancer controller creates the ALB, so its hostname is not known until after the apply.
+# external-dns closes that loop: it reads the host on each Ingress and keeps an alias record pointing at
+# whichever ALB currently serves it. After a nightly Destroy the records go stale for as long as the
+# environment is down, then are repointed automatically on the next deploy.
+resource "helm_release" "external_dns" {
+  count      = var.domain_name == "" ? 0 : 1
+  name       = "external-dns"
+  repository = "https://kubernetes-sigs.github.io/external-dns/"
+  chart      = "external-dns"
+  version    = lookup(var.chart_versions, "external_dns", null)
+  namespace  = "kube-system"
+
+  values = [yamlencode({
+    provider      = { name = "aws" }
+    aws           = { region = var.region, zoneType = "public" }
+    domainFilters = [var.domain_name] # never touch records outside this zone
+    sources       = ["ingress"]
+    policy        = "sync"                # remove records when their Ingress goes away
+    txtOwnerId    = local.cluster_name    # stable across rebuilds, so it recognises its own records
+    serviceAccount = {
+      name        = "external-dns"
+      annotations = { "eks.amazonaws.com/role-arn" = local.roles.external_dns }
+    }
+    resources = {
+      requests = { cpu = "10m", memory = "64Mi" }
+      limits   = { memory = "128Mi" }
+    }
   })]
 
   depends_on = [helm_release.aws_lb_controller]

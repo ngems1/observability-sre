@@ -97,6 +97,7 @@ module "irsa" {
   cluster_name       = module.eks.cluster_name
   oidc_provider_arn  = module.eks.oidc_provider_arn
   oidc_issuer_url    = module.eks.cluster_oidc_issuer_url
+  domain_name        = var.domain_name
   app_log_group_arns = [for e in module.env : e.log_group_arn]
 }
 

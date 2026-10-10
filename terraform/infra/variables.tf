@@ -159,3 +159,9 @@ variable "enable_cloudtrail" {
   type    = bool
   default = false
 }
+
+variable "domain_name" {
+  description = "Optional. Apex of the Route 53 hosted zone (same value as the bootstrap root). Empty = HTTP on the raw load-balancer hostname."
+  type        = string
+  default     = ""
+}

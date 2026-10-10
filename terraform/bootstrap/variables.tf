@@ -33,3 +33,9 @@ variable "github_subject_repository" {
   type        = string
   default     = "ngems1@330211773/observability-sre@1410480281"
 }
+
+variable "domain_name" {
+  description = "Optional. Apex of an existing Route 53 public hosted zone, e.g. example.click. Empty = no certificate, and the app stays on HTTP at the raw load-balancer hostname."
+  type        = string
+  default     = ""
+}

@@ -7,3 +7,7 @@ allowed_cidrs = ["203.0.113.10/32"]                        # your public IP (sea
 #   kube_prometheus_stack = "x.y.z"
 #   tempo                 = "x.y.z"
 # }
+
+# Same value as the bootstrap root. Set: HTTPS on dev.<domain> and opsdesk.<domain>, HTTP redirected to it.
+# Empty: HTTP on the raw load-balancer hostname.
+# domain_name = "example.click"

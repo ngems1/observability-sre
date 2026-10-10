@@ -22,13 +22,37 @@ resource "aws_secretsmanager_secret_version" "grafana" {
   secret_string = jsonencode({ username = "admin", password = random_password.grafana_admin.result })
 }
 
+# Issued by terraform/bootstrap and left out of the nightly teardown, so it is looked up, not created.
+data "aws_acm_certificate" "this" {
+  count       = var.domain_name == "" ? 0 : 1
+  domain      = var.domain_name # the certificate also carries *.<domain> as a SAN
+  statuses    = ["ISSUED"]
+  most_recent = true
+}
+
 locals {
-  alb_common_annotations = {
+  # One hostname per environment. Grafana stays on /grafana of each, because it is served from a sub-path
+  # (grafana.ini root_url) and each environment's URL should carry its own monitoring link.
+  env_hosts = var.domain_name == "" ? {} : {
+    dev  = "dev.${var.domain_name}"
+    prod = "opsdesk.${var.domain_name}"
+  }
+
+  # Without a domain there is no certificate, so the listener stays HTTP-only on the raw ALB hostname.
+  alb_tls_annotations = var.domain_name == "" ? {
+    "alb.ingress.kubernetes.io/listen-ports" = "[{\"HTTP\": 80}]"
+    } : {
+    "alb.ingress.kubernetes.io/listen-ports"    = "[{\"HTTP\": 80}, {\"HTTPS\": 443}]"
+    "alb.ingress.kubernetes.io/certificate-arn" = data.aws_acm_certificate.this[0].arn
+    "alb.ingress.kubernetes.io/ssl-redirect"    = "443" # the controller adds the 80 -> 443 redirect rule
+    "alb.ingress.kubernetes.io/ssl-policy"      = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+  }
+
+  alb_common_annotations = merge({
     "alb.ingress.kubernetes.io/scheme"        = "internet-facing"
     "alb.ingress.kubernetes.io/target-type"   = "ip"
     "alb.ingress.kubernetes.io/inbound-cidrs" = join(",", var.allowed_cidrs)
-    "alb.ingress.kubernetes.io/listen-ports"  = "[{\"HTTP\": 80}]"
-  }
+  }, local.alb_tls_annotations)
 }
 
 resource "helm_release" "tempo" {
@@ -251,7 +275,7 @@ resource "helm_release" "kube_prometheus_stack" {
         ingressClassName = "alb"
         path             = "/grafana"
         pathType         = "Prefix"
-        hosts            = []
+        hosts            = compact([try(local.env_hosts["prod"], "")])
         # Grafana is a platform tool: one instance, reachable at /grafana on both environments' load balancers
         annotations = merge(local.alb_common_annotations, {
           "alb.ingress.kubernetes.io/group.name"       = "opsdesk-prod"
@@ -299,6 +323,7 @@ resource "kubernetes_ingress_v1" "grafana_dev" {
   spec {
     ingress_class_name = "alb"
     rule {
+      host = try(local.env_hosts["dev"], null)
       http {
         path {
           path      = "/grafana"

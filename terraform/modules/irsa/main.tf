@@ -80,3 +80,30 @@ module "irsa_cluster_autoscaler" {
     }
   }
 }
+
+# ---------------------------------------------------------------- external-dns -> Route 53 (one hosted zone only)
+# external-dns watches Ingresses and keeps the DNS records in step with whatever ALB the load balancer
+# controller created. That matters here because the environment is torn down nightly: every rebuild gets a
+# new ALB hostname, and without this the records would have to be repointed by hand each morning.
+data "aws_route53_zone" "this" {
+  count        = var.domain_name == "" ? 0 : 1
+  name         = "${var.domain_name}."
+  private_zone = false
+}
+
+module "irsa_external_dns" {
+  #checkov:skip=CKV_TF_1:Registry module pinned with a version constraint
+  count   = var.domain_name == "" ? 0 : 1
+  source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
+  version = "~> 5.55"
+
+  role_name                     = "${var.name}-external-dns"
+  attach_external_dns_policy    = true
+  external_dns_hosted_zone_arns = [data.aws_route53_zone.this[0].arn] # this zone, not "*"
+  oidc_providers = {
+    main = {
+      provider_arn               = var.oidc_provider_arn
+      namespace_service_accounts = ["kube-system:external-dns"]
+    }
+  }
+}
