@@ -109,6 +109,20 @@ jobs:
           VAR_ALERT_EMAIL: ${{ vars.ALERT_EMAIL }}
           VAR_ALLOWED_CIDRS: ${{ vars.ALLOWED_CIDRS }}
           VAR_AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+      # The platform root looks the certificate up by domain and errors with "empty result" if it is not
+      # there yet - twenty minutes into the apply. Fail here instead, in seconds, with the actual remedy.
+      - name: Certificate is issued (only when DOMAIN_NAME is set)
+        if: vars.DOMAIN_NAME != ''
+        run: |
+          arn="$(aws acm list-certificates --certificate-statuses ISSUED \
+            --query "CertificateSummaryList[?DomainName=='${{ vars.DOMAIN_NAME }}'].CertificateArn | [0]" \
+            --output text 2>/dev/null || echo None)"
+          if [[ "$arn" == "None" || -z "$arn" ]]; then
+            echo "::error title=No certificate for ${{ vars.DOMAIN_NAME }}::Run the Bootstrap workflow first - it issues the ACM certificate and validates it by DNS. If Bootstrap already ran, the certificate may still be PENDING_VALIDATION (a few minutes), or the hosted zone for ${{ vars.DOMAIN_NAME }} may not exist in this account."
+            aws acm list-certificates --query 'CertificateSummaryList[].{Domain:DomainName,Status:Status}' --output table || true
+            exit 1
+          fi
+          echo "Certificate: $arn"
       - name: Infra (~20 min first time) + platform (~10 min)
         run: bash scripts/aws/up.sh --skip-app
       - name: Summary
