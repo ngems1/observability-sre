@@ -102,16 +102,78 @@ queue — the same lesson as test notifications reaching a real Slack channel.
 
 ## Postmortem — drill 6, PostgreSQL unreachable from the pods
 
-The showpiece: the database is **healthy**, and the platform still says *network*. Every naive
-dashboard blames the database here.
+Blameless: this describes what the system did and why it allowed it, not who did what. The fault was injected
+on purpose; the findings were not expected.
 
-```
-Impact:
-Detection:     OpsDeskDependencyUnreachable{dependency=postgres,kind=connect_timeout}, layer network
-               fired at:        ticket created at:        triaged at:
-Root cause:    egress NetworkPolicy no longer allows 5432; RDS itself answered normally throughout
-               (4 Database tile green, 5 Network tile red — that pair is the whole finding)
-Resolution:    drill6-network-block-db-off restored port 5432; pods reconnected
-Evidence:      docs/screenshots/drill6-*.png, trace id:        , run:
-Follow-ups:    owner + due date
-```
+**Summary.** For about 17 minutes the dev API pods could not open connections to PostgreSQL. The database was
+healthy throughout. Alertmanager opened OPS-1821 naming the **network** layer, with no human judgement between the
+fault and the ticket.
+
+| | |
+| --- | --- |
+| **Environment** | dev (`opsdesk-dev`), under k6 load; prod unaffected (own namespace, RDS, queue, IAM) |
+| **Severity** | critical (alert severity → ticket priority) |
+| **Impact** | dev API returned 503 from the load balancer; ticket creation, approvals and comments failed; no data lost (all writes failed before commit, nothing half-written) |
+| **Detection** | `OpsDeskDependencyUnreachable{dependency=postgres, kind=connect_timeout}`, `layer=network`, about 2 min after injection |
+| **Duration** | 15:04 → 15:23:40 UTC, 17 min 30 s as measured by the platform (how long the fault was left running, not response time) |
+| **Ticket** | OPS-1821, opened by Alertmanager, team Platform, runbook link attached |
+
+### Timeline (UTC, 2026-10-11)
+
+| Time | Event |
+| --- | --- |
+| 15:04 | `drill6-network-block-db-on`: port 5432 removed from the pods' egress NetworkPolicy, API and worker restarted |
+| 15:04–15:06 | new pods cannot connect; `connect_timeout` climbs from 0 toward 380/min; readiness fails; ALB returns 503 |
+| 15:06:10 | `OpsDeskDependencyUnreachable` fires; symptom alerts (`ErrorBudgetBurn`, `ApiLatencyHigh`) muted by inhibition |
+| 15:06 | Alertmanager delivers to OpsDesk: OPS-1821, *Suspected layer: Network* |
+| 15:23:40 | `drill6-network-block-db-off`; pods reconnect; alert resolves; "recovered after 17 min 30 s" written to the ticket |
+
+> **Check before presenting:** OPS-1821 shows *Triage due 10:57:47 AM* (EDT), and critical tickets get 30 min,
+> so the ticket appears to have been **created about 14:27 UTC**, before this run. The network-errors panel also
+> shows two error bursts (around 14:20 and 15:05 UTC). Most likely an earlier drill 6 run opened OPS-1821 and this
+> run re-fired onto the same open ticket (one open incident per alert fingerprint, by design). Confirm in Actions →
+> Ops run history and correct the timeline: ticket created at ____, first injection at ____.
+
+### Root cause
+
+The egress NetworkPolicy no longer allowed TCP 5432 from the app pods to RDS. RDS answered normally throughout:
+the **4 Database** tile stayed green (no statements completed, so no slow statements), while the **5 Network** tile
+went red on `connect_timeout`. That pair is the whole finding.
+
+### Why it was hard to diagnose
+
+Every user-visible symptom pointed at the database: failed queries, unready pods, 503s. A dashboard built on
+averages would have turned a database tile red and paged the database team. The distinguishing signal is the
+*kind* of failure (`connect_timeout` rather than `query_timeout` or `too_many_connections`) and the database row
+reporting *no data* rather than high latency.
+
+### Resolution
+
+`drill6-network-block-db-off` restored port 5432; new connections succeeded and the pods passed readiness.
+
+### What went well
+
+- The correct layer was named automatically, about 2 minutes after the fault.
+- One ticket: symptom alerts stayed muted while the cause fired.
+- Time to recover was measured and written to the ticket without anyone typing a number.
+
+### What went badly (each found by running the drill, not by reading the code)
+
+1. **The block did nothing at first.** A NetworkPolicy stops only *new* connections; pods kept serving from their
+   existing pool. The drill now restarts both workloads after applying the policy.
+2. **Metrics went quiet at the worst moment.** Pods that failed readiness dropped out of Prometheus's scrape
+   targets, so the error rate fell back to zero while the fault was still active.
+3. **OpsDesk could not reliably record its own outage.** The ticket API depends on the same database, so the
+   Alertmanager webhook had nowhere to deliver while the fault lasted.
+
+### Follow-ups
+
+| # | Action | Owner | Due | Status |
+| --- | --- | --- | --- | --- |
+| 1 | Restart API and worker as part of `drill6-network-block-db-on` | Sebastien Ngembou | 2026-10-11 | done |
+| 2 | Alert when an expected scrape target disappears (`up == 0` / absent target for opsdesk-api) | Sebastien Ngembou | 2026-10-18 | open |
+| 3 | Send critical Alertmanager alerts to the SNS topic as well as OpsDesk (Alertmanager IRSA role with `sns:Publish`) | Sebastien Ngembou | 2026-10-18 | open |
+| 4 | Confirm the ticket-creation time above from the Ops run history and correct the timeline | Sebastien Ngembou | before the presentation | open |
+
+**Evidence:** `docs/screenshots/drill6-0-run-log.png` … `drill6-4-recovered-ttr.png`, Ops workflow run log
+(injected / finished timestamps), ticket OPS-1821.
