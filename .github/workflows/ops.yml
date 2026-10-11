@@ -139,12 +139,17 @@ jobs:
               # NetworkPolicies only apply to NEW connections: end the app's open DB sessions from a throwaway
               # pod that the OpsDesk policies do not select, so the app has to reconnect (and cannot).
               # shellcheck disable=SC2016  # $DB is expanded inside the pod, not here
+              # shellcheck disable=SC2015
               kubectl -n "$NS" run drill6-cut --rm -i --restart=Never --image=postgres:16-alpine --overrides='{
                 "spec": {"securityContext": {"runAsNonRoot": true, "runAsUser": 70, "seccompProfile": {"type": "RuntimeDefault"}},
                   "containers": [{"name": "drill6-cut", "image": "postgres:16-alpine",
                     "command": ["sh", "-c", "psql \"$(echo \"$DB\" | sed s/+psycopg//)\" -Atc \"SELECT count(pg_terminate_backend(pid)) AS sessions_ended FROM pg_stat_activity WHERE usename = current_user AND pid <> pg_backend_pid()\""],
                     "env": [{"name": "DB", "valueFrom": {"secretKeyRef": {"name": "opsdesk-secrets", "key": "OPSDESK_DATABASE_URL"}}}],
                     "securityContext": {"allowPrivilegeEscalation": false, "capabilities": {"drop": ["ALL"]}}}]}}'
+              # Terminating the sessions is not enough on its own: SQLAlchemy may hand a pooled connection
+              # straight back, and a NetworkPolicy only blocks NEW connections. Restarting both workloads
+              # guarantees pods with an EMPTY pool that have to open fresh connections - which are blocked.
+              kubectl -n "$NS" rollout restart deploy/opsdesk-api deploy/opsdesk-worker
               echo "Expect: OpsDeskDependencyUnreachable{dependency=postgres,kind=connect_timeout} -> ALERT ticket, layer network (~3 min)" ;;
             drill6-network-block-db-off)
               chaos_nowait --set 'networkPolicy.egressPorts={5432,443,4318}'
