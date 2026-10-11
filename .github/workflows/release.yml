@@ -1,4 +1,4 @@
-# Release pipeline (every push to main, or Actions -> Release -> Run):
+# Release pipeline (Actions -> Release -> Run workflow):
 #   CI (tests, lint, Trivy, Checkov, Helm) -> build immutable image (commit SHA) -> Trivy gate -> push to ECR
 #   -> dev:  helm upgrade --atomic into opsdesk-dev -> smoke test -> automatic rollback on failure
 #   -> [approval: GitHub environment "prod"] -> prod: the SAME image into opsdesk-prod -> smoke -> rollback
@@ -6,8 +6,8 @@
 name: Release
 
 on:
-  push:
-    branches: [main]
+  # Deliberately manual: CI gates every pull request, but deploying is a decision, not a side effect of
+  # merging. It also keeps the AWS environment from being redeployed by commits that only touch docs.
   workflow_dispatch:
 
 permissions:
