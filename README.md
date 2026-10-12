@@ -449,8 +449,6 @@ docs/                     evidence, incidents and postmortem, runbook, AWS guide
 
 - **Four of nine drills have been run.** Dev/prod isolation is therefore a design property, not yet a demonstrated
   one (drill 7 proves it).
-- **The error-budget tile averages 30 days** in an environment rebuilt daily, so one startup burst turns it red.
-- **The worker-poll panel reads "63.4 years"** when the worker is absent (it subtracts a zero gauge).
 - **A latency-only fault lights no verdict tile** — the Application tile measures error ratio; it is found on the
   request/database panel.
 - **Traces are wired but thin** — deployed and linked from exemplars, not exercised in the drills.
