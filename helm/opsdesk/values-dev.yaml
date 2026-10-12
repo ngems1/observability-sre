@@ -12,4 +12,4 @@ api:
     minAvailable: 0                  # single replica in dev: allow node drains
 
 worker:
-  replicas: 1
+  replicas: 2                         # 1 worker could not drain 5 req/s of k6 load (40K backlog, 2026-10-12)
